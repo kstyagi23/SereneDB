@@ -75,10 +75,10 @@ SereneDB is an open-source project designed to efficiently store, retrieve, and 
 
 ## List of Functions for SereneDB and Their Purpose
 
-### 1. `initializeSereneDB()`
+### 1. `create()`
 - Set up SereneDB by initializing IndexedDB with the necessary object stores and indexes.
 
-### 2. `loadDataFromSereneDB()`
+### 2. `loadData()`
 - Load vector data from IndexedDB into SereneDB’s in-memory variable.
 
 ### 3. `saveDataToSereneDB(vectorData)`
