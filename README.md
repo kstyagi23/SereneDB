@@ -1,3 +1,5 @@
+## THE PROJECT IS WIP (WORK IN PROGRESS)
+
 # SereneDB
 
 SereneDB is an open-source project designed to efficiently store, retrieve, and search vector data in the browser using IndexedDB, localStorage, and in-memory caching. This database system is optimized for fast access to vector data while ensuring data integrity and synchronization across various storage mediums.
