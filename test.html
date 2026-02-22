@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SereneDB Test Suite</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #555;
+            margin-top: 30px;
+        }
+        .test-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .test-result {
+            padding: 10px 15px;
+            margin: 8px 0;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+        }
+        .pass {
+            background: #d4edda;
+            color: #155724;
+            border-left: 4px solid #28a745;
+        }
+        .fail {
+            background: #f8d7da;
+            color: #721c24;
+            border-left: 4px solid #dc3545;
+        }
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border-left: 4px solid #17a2b8;
+        }
+        .warning {
+            background: #fff3cd;
+            color: #856404;
+            border-left: 4px solid #ffc107;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-card h3 {
+            margin: 0;
+            font-size: 32px;
+        }
+        .stat-card p {
+            margin: 5px 0 0 0;
+            opacity: 0.9;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 13px;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            transition: width 0.3s ease;
+        }
+        #summary {
+            position: sticky;
+            top: 0;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            margin-bottom: 20px;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 SereneDB Test Suite</h1>
+    
+    <div id="summary">
+        <div class="stats">
+            <div class="stat-card">
+                <h3 id="totalTests">0</h3>
+                <p>Total Tests</p>
+            </div>
+            <div class="stat-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%);">
+                <h3 id="passedTests">0</h3>
+                <p>Passed</p>
+            </div>
+            <div class="stat-card" style="background: linear-gradient(135deg, #dc3545 0%, #fd7e14 100%);">
+                <h3 id="failedTests">0</h3>
+                <p>Failed</p>
+            </div>
+        </div>
+        <button onclick="runAllTests()">▶ Run All Tests</button>
+        <button onclick="clearResults()">🗑 Clear Results</button>
+    </div>
+
+    <div id="testResults"></div>
+
+    <script src="SereneDB.js"></script>
+    <script>
+        let testStats = { total: 0, passed: 0, failed: 0 };
+        let db;
+
+        function updateStats() {
+            document.getElementById('totalTests').textContent = testStats.total;
+            document.getElementById('passedTests').textContent = testStats.passed;
+            document.getElementById('failedTests').textContent = testStats.failed;
+        }
+
+        function log(message, type = 'info') {
+            const resultsDiv = document.getElementById('testResults');
+            const resultDiv = document.createElement('div');
+            resultDiv.className = `test-result ${type}`;
+            resultDiv.textContent = message;
+            resultsDiv.appendChild(resultDiv);
+        }
+
+        function clearResults() {
+            document.getElementById('testResults').innerHTML = '';
+            testStats = { total: 0, passed: 0, failed: 0 };
+            updateStats();
+        }
+
+        function assert(condition, testName) {
+            testStats.total++;
+            if (condition) {
+                testStats.passed++;
+                log(`✅ PASS: ${testName}`, 'pass');
+                return true;
+            } else {
+                testStats.failed++;
+                log(`❌ FAIL: ${testName}`, 'fail');
+                return false;
+            }
+        }
+
+        async function runAllTests() {
+            clearResults();
+            
+            try {
+                await testInitialization();
+                await testDataStorage();
+                await testDataRetrieval();
+                await testVectorSearch();
+                await testCacheManagement();
+                await testUtilityMethods();
+                await testMemoryManagement();
+                await testErrorHandling();
+                await testCleanup();
+            } catch (error) {
+                log(`⚠️ Test suite error: ${error.message}`, 'fail');
+            }
+            
+            updateStats();
+            log(`\n📊 Test Summary: ${testStats.passed}/${testStats.total} tests passed`, 
+                testStats.failed === 0 ? 'pass' : 'fail');
+        }
+
+        async function testInitialization() {
+            log('\n📦 Testing Initialization...', 'info');
+            
+            // Test 1: Create database
+            db = new SereneDB('TestDB');
+            await db.create();
+            assert(db !== null, 'Database created successfully');
+            
+            // Test 2: Check initial state
+            assert(db.count() === 0, 'Initial count is 0');
+            
+            // Test 3: Check metadata
+            const metadata = db.getMetadata();
+            assert(metadata.itemCount === 0, 'Metadata itemCount is 0');
+        }
+
+        async function testDataStorage() {
+            log('\n💾 Testing Data Storage...', 'info');
+            
+            // Test 1: Insert single vector
+            const vector1 = {
+                id: 'vec1',
+                vector: [1, 0, 0, 0],
+                metadata: { label: 'first' }
+            };
+            await db.saveDataToSereneDB(vector1);
+            assert(db.count() === 1, 'Single vector inserted');
+            
+            // Test 2: Insert multiple vectors
+            const vectors = [
+                { id: 'vec2', vector: [0, 1, 0, 0], metadata: { label: 'second' } },
+                { id: 'vec3', vector: [0, 0, 1, 0], metadata: { label: 'third' } },
+                { id: 'vec4', vector: [0, 0, 0, 1], metadata: { label: 'fourth' } }
+            ];
+            await db.saveDataToSereneDB(vectors);
+            assert(db.count() === 4, 'Multiple vectors inserted');
+            
+            // Test 3: Update existing vector
+            const updatedVector = {
+                id: 'vec1',
+                vector: [1, 1, 0, 0],
+                metadata: { label: 'updated-first' }
+            };
+            await db.saveDataToSereneDB(updatedVector);
+            const retrieved = db.get('vec1');
+            assert(retrieved.metadata.label === 'updated-first', 'Vector updated successfully');
+            
+            // Test 4: Batch insert
+            const batchVectors = [];
+            for (let i = 5; i <= 20; i++) {
+                batchVectors.push({
+                    id: `vec${i}`,
+                    vector: [Math.random(), Math.random(), Math.random(), Math.random()],
+                    metadata: { index: i }
+                });
+            }
+            await db.batchInsert(batchVectors, (current, total) => {
+                // Progress callback
+            });
+            assert(db.count() === 20, 'Batch insert completed');
+        }
+
+        async function testDataRetrieval() {
+            log('\n🔍 Testing Data Retrieval...', 'info');
+            
+            // Test 1: Get by ID
+            const vec1 = db.get('vec1');
+            assert(vec1 !== null && vec1.id === 'vec1', 'Get by ID works');
+            
+            // Test 2: Get non-existent ID
+            const notFound = db.get('nonexistent');
+            assert(notFound === null, 'Get non-existent returns null');
+            
+            // Test 3: Has method
+            assert(db.has('vec1') === true, 'Has returns true for existing');
+            assert(db.has('nonexistent') === false, 'Has returns false for non-existing');
+            
+            // Test 4: Get all IDs
+            const ids = db.getAllIds();
+            assert(ids.length === 20, 'getAllIds returns correct count');
+            
+            // Test 5: Get all vectors
+            const all = db.getAll();
+            assert(all.length === 20, 'getAll returns correct count');
+        }
+
+        async function testVectorSearch() {
+            log('\n🎯 Testing Vector Search...', 'info');
+            
+            // Test 1: Cosine similarity search
+            const queryVector = [1, 0, 0, 0];
+            const results = db.performSereneDBVectorSearch(queryVector, { limit: 5 });
+            assert(results.length > 0, 'Vector search returns results');
+            
+            // Test 2: Results are sorted by similarity
+            if (results.length > 1) {
+                const sorted = results.every((item, i) => 
+                    i === 0 || results[i-1].similarity >= item.similarity
+                );
+                assert(sorted, 'Results sorted by similarity (descending)');
+            }
+            
+            // Test 3: Limit parameter works
+            const limitedResults = db.performSereneDBVectorSearch(queryVector, { limit: 3 });
+            assert(limitedResults.length === 3, 'Limit parameter works');
+            
+            // Test 4: Threshold parameter works
+            const thresholdResults = db.performSereneDBVectorSearch(queryVector, { 
+                threshold: 0.99,
+                limit: 100 
+            });
+            const allAboveThreshold = thresholdResults.every(r => r.similarity >= 0.99);
+            assert(allAboveThreshold, 'Threshold parameter filters results');
+            
+            // Test 5: Different distance metrics
+            const euclideanResults = db.performSereneDBVectorSearch(queryVector, { 
+                metric: 'euclidean',
+                limit: 5 
+            });
+            assert(euclideanResults.length > 0, 'Euclidean distance works');
+            
+            const dotResults = db.performSereneDBVectorSearch(queryVector, { 
+                metric: 'dot',
+                limit: 5 
+            });
+            assert(dotResults.length > 0, 'Dot product works');
+            
+            // Test 6: Search config
+            db.setSearchConfig({ limit: 7, metric: 'cosine' });
+            const config = db.getSearchConfig();
+            assert(config.limit === 7, 'Search config updated');
+        }
+
+        async function testCacheManagement() {
+            log('\n🗄 Testing Cache Management...', 'info');
+            
+            // Test 1: Update cache
+            db.updateCacheInSereneDB();
+            const cacheKey = 'sereneDB_cache_TestDB';
+            const cached = localStorage.getItem(cacheKey);
+            assert(cached !== null, 'Cache saved to localStorage');
+            
+            // Test 2: Load from cache
+            const newDb = new SereneDB('TestDB');
+            await newDb.create();
+            assert(newDb.count() === 20, 'Cache loaded correctly');
+            
+            // Test 3: Sync
+            await newDb.syncSereneDBCacheAndDatabase();
+            assert(newDb.count() === 20, 'Sync works correctly');
+            
+            // Test 4: Clear cache
+            newDb.clearSereneDBCache();
+            const clearedCache = localStorage.getItem('sereneDB_cache_TestDB');
+            assert(clearedCache === null, 'Cache cleared');
+            
+            // Clean up
+            newDb.close();
+        }
+
+        async function testUtilityMethods() {
+            log('\n🛠 Testing Utility Methods...', 'info');
+            
+            // Test 1: Export
+            const exported = db.export();
+            assert(exported.data.length === 20, 'Export works');
+            assert(exported.dbName === 'TestDB', 'Export includes dbName');
+            
+            // Test 2: Import
+            const importDb = new SereneDB('ImportTestDB');
+            await importDb.create();
+            await importDb.import(exported);
+            assert(importDb.count() === 20, 'Import works');
+            
+            // Test 3: Memory stats
+            const stats = db.getMemoryStats();
+            assert(stats.itemCount === 20, 'Memory stats correct');
+            assert(stats.estimatedBytes > 0, 'Memory estimation works');
+            
+            // Test 4: Delete
+            await db.delete('vec1');
+            assert(db.count() === 19, 'Delete works');
+            assert(db.get('vec1') === null, 'Deleted item not found');
+            
+            // Test 5: Delete many
+            await db.deleteMany(['vec2', 'vec3']);
+            assert(db.count() === 17, 'Delete many works');
+            
+            // Clean up
+            await importDb.destroy();
+        }
+
+        async function testMemoryManagement() {
+            log('\n🧠 Testing Memory Management...', 'info');
+            
+            // Test 1: Unload
+            const memDb = new SereneDB('MemoryTestDB');
+            await memDb.create();
+            await memDb.saveDataToSereneDB([
+                { id: 'm1', vector: [1, 2, 3] },
+                { id: 'm2', vector: [4, 5, 6] }
+            ]);
+            assert(memDb.count() === 2, 'Data loaded');
+            
+            memDb.unloadSereneDBDataFromMemory(false);
+            assert(memDb.count() === 0, 'Memory unloaded');
+            
+            // Test 2: Optimize search
+            db.optimizeSereneDBSearchPerformance({ useQuantization: false });
+            assert(true, 'Optimization runs without error');
+            
+            // Clean up
+            await memDb.destroy();
+        }
+
+        async function testErrorHandling() {
+            log('\n⚠️ Testing Error Handling...', 'info');
+            
+            // Test 1: Error handler
+            const error = db.sereneDBErrorHandler('Test error');
+            assert(error.name === 'SereneDBError', 'Error handler creates SereneDBError');
+            
+            // Test 2: Missing ID
+            try {
+                await db.saveDataToSereneDB({ vector: [1, 2, 3] });
+                assert(false, 'Should throw error for missing ID');
+            } catch (e) {
+                assert(true, 'Throws error for missing ID');
+            }
+            
+            // Test 3: Missing vector
+            try {
+                await db.saveDataToSereneDB({ id: 'test' });
+                assert(false, 'Should throw error for missing vector');
+            } catch (e) {
+                assert(true, 'Throws error for missing vector');
+            }
+            
+            // Test 4: Dimension mismatch
+            try {
+                await db.saveDataToSereneDB({ id: 'wrong', vector: [1, 2, 3] });
+                assert(false, 'Should throw error for dimension mismatch');
+            } catch (e) {
+                assert(true, 'Throws error for dimension mismatch');
+            }
+        }
+
+        async function testCleanup() {
+            log('\n🧹 Testing Cleanup...', 'info');
+            
+            // Test 1: Close
+            db.close();
+            assert(true, 'Database closed');
+            
+            // Test 2: Destroy
+            await db.destroy();
+            assert(true, 'Database destroyed');
+            
+            // Verify destruction
+            const testDb = new SereneDB('TestDB');
+            await testDb.create();
+            assert(testDb.count() === 0, 'Database was properly destroyed');
+            await testDb.destroy();
+        }
+    </script>
+</body>
+</html>
