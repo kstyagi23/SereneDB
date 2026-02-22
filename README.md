@@ -1,120 +1,390 @@
-## THE PROJECT IS WIP (WORK IN PROGRESS)
-
 # SereneDB
 
-SereneDB is an open-source project designed to efficiently store, retrieve, and search vector data in the browser using IndexedDB, localStorage, and in-memory caching. This database system is optimized for fast access to vector data while ensuring data integrity and synchronization across various storage mediums.
+SereneDB is a fast, reliable, open-source in-browser vector database designed for efficient storage, retrieval, and similarity search of vector embeddings. It leverages IndexedDB for persistent storage, localStorage for caching, and in-memory operations for lightning-fast vector searches.
 
-## Roadmap for SereneDB
+## ✨ Features
 
-### 1. Initial Setup
-- Define the project requirements and scope for SereneDB.
-- Set up the development environment.
-- Outline data structure and schema for storing vectors in SereneDB using IndexedDB and localStorage.
+- **🚀 Fast Vector Search** - In-memory operations with cosine, euclidean, and dot product similarity metrics
+- **💾 Multi-Layer Storage** - IndexedDB for persistence, localStorage for caching, memory for speed
+- **🔄 Auto-Sync** - Automatic synchronization between storage layers
+- **🛡️ Data Integrity** - Handles abrupt closures with emergency save to localStorage
+- **📦 Batch Operations** - Efficient batch insert with progress callbacks
+- **🔧 Configurable** - Customizable search parameters and optimization options
+- **📊 Memory Management** - Load/unload data to manage memory efficiently
+- **🌐 Browser Native** - No external dependencies, works in all modern browsers
 
-### 2. Design Phase
-- Design the data model for vectors in SereneDB.
-- Define how vector data will be stored, loaded, and cached within SereneDB.
-- Design the architecture, including data flow between IndexedDB, localStorage, and in-memory variables.
+## 🚀 Quick Start
 
-### 3. Storage and Caching Strategy
-- Implement IndexedDB within SereneDB for persistent storage of vectors.
-- Implement localStorage as a caching mechanism for SereneDB.
-- Develop a strategy to load data into memory and keep the cache in sync within SereneDB.
+```javascript
+// Create a new SereneDB instance
+const db = new SereneDB('myVectorDB');
 
-### 4. Core Functionality Implementation
-- Load vector data from IndexedDB into in-memory variables within SereneDB.
-- Implement vector search operations directly on the in-memory data within SereneDB.
-- Ensure cache updates using localStorage during vector operations in SereneDB.
+// Initialize the database
+await db.create();
 
-### 5. Edge Cases and Error Handling
-- Handle abrupt breaks by ensuring data integrity within SereneDB.
-- Implement fallback mechanisms for SereneDB if data retrieval or storage fails.
-- Manage synchronization between in-memory data, IndexedDB, and localStorage in SereneDB.
+// Insert vectors
+await db.saveDataToSereneDB({
+    id: 'doc1',
+    vector: [0.1, 0.2, 0.3, 0.4],
+    metadata: { title: 'Document 1', category: 'tech' }
+});
 
-### 6. Optimization
-- Optimize vector search operations within SereneDB for performance.
-- Implement efficient data loading and caching strategies in SereneDB.
-- Minimize the overhead of synchronization between storage and in-memory operations in SereneDB.
+// Batch insert
+await db.saveDataToSereneDB([
+    { id: 'doc2', vector: [0.2, 0.3, 0.4, 0.5], metadata: { title: 'Document 2' } },
+    { id: 'doc3', vector: [0.3, 0.4, 0.5, 0.6], metadata: { title: 'Document 3' } }
+]);
 
-### 7. Testing
-- Unit test all SereneDB functions and operations.
-- Test synchronization between IndexedDB, localStorage, and in-memory data within SereneDB.
-- Ensure SereneDB handles large datasets effectively.
+// Perform vector search
+const results = db.performSereneDBVectorSearch([0.1, 0.2, 0.3, 0.4], {
+    limit: 5,
+    threshold: 0.8,
+    metric: 'cosine'
+});
 
-### 8. Documentation
-- Document SereneDB's architecture, code, and usage.
-- Provide guidelines for extending or modifying SereneDB's search functionality.
+console.log(results);
+// [{ id: 'doc1', similarity: 1.0, metadata: {...}, ... }, ...]
+```
 
-### 9. Deployment
-- Prepare SereneDB for deployment, ensuring browser compatibility.
-- Optimize SereneDB for performance on different browsers.
-- Monitor for any issues post-deployment and iterate on SereneDB as needed.
+## 📖 API Reference
 
-## List of Required Operations for SereneDB
+### Initialization
 
-### 1. Data Storage and Retrieval
-- Store vectors in IndexedDB via SereneDB.
-- Retrieve vectors from IndexedDB into SereneDB’s in-memory variables.
-- Cache vector data in localStorage through SereneDB.
+#### `constructor(dbName = 'SereneDB')`
+Create a new SereneDB instance.
 
-### 2. Vector Search Operations
-- Perform vector search directly on SereneDB's in-memory data.
-- Return search results efficiently through SereneDB.
+```javascript
+const db = new SereneDB('myDatabase');
+```
 
-### 3. Cache Management
-- Update the cache in localStorage during vector operations within SereneDB.
-- Synchronize SereneDB’s in-memory data with localStorage and IndexedDB.
+#### `async create()`
+Initialize the database. Must be called before any operations.
 
-### 4. Error Handling
-- Handle cases where data retrieval or storage fails within SereneDB.
-- Ensure data integrity in case of abrupt application closures in SereneDB.
+```javascript
+await db.create();
+```
 
-### 5. Data Loading and Unloading
-- Load data into SereneDB’s memory at the start of operations.
-- Unload data from SereneDB’s memory if not needed to free up resources.
+### Data Operations
 
-## List of Functions for SereneDB and Their Purpose
+#### `async saveDataToSereneDB(vectorData)`
+Store or update vector data.
 
-### 1. `create()`
-- Set up SereneDB by initializing IndexedDB with the necessary object stores and indexes.
+```javascript
+// Single vector
+await db.saveDataToSereneDB({
+    id: 'unique-id',
+    vector: [0.1, 0.2, 0.3],
+    metadata: { any: 'data' }  // optional
+});
 
-### 2. `loadData()`
-- Load vector data from IndexedDB into SereneDB’s in-memory variable.
+// Multiple vectors
+await db.saveDataToSereneDB([
+    { id: 'id1', vector: [0.1, 0.2, 0.3] },
+    { id: 'id2', vector: [0.4, 0.5, 0.6] }
+]);
+```
 
-### 3. `saveDataToSereneDB(vectorData)`
-- Store or update vector data in SereneDB's IndexedDB.
+#### `async loadData()`
+Load all vector data from IndexedDB into memory.
 
-### 4. `loadCacheFromSereneDB()`
-- Load cached data from localStorage into SereneDB’s in-memory variable.
+```javascript
+await db.loadData();
+```
 
-### 5. `updateCacheInSereneDB()`
-- Update localStorage with the latest in-memory vector data to keep the cache in SereneDB up-to-date.
+#### `get(id)`
+Retrieve a single vector by ID.
 
-### 6. `performSereneDBVectorSearch(queryVector)`
-- Perform a vector search using SereneDB’s in-memory data and return the results.
+```javascript
+const vector = db.get('my-id');
+```
 
-### 7. `syncSereneDBCacheAndDatabase()`
-- Synchronize SereneDB’s in-memory data, localStorage cache, and IndexedDB to ensure consistency.
+#### `has(id)`
+Check if a vector exists.
 
-### 8. `handleSereneDBAbruptClosure()`
-- Ensure data integrity by saving in-memory data to localStorage in case of an abrupt closure in SereneDB.
+```javascript
+if (db.has('my-id')) {
+    // Vector exists
+}
+```
 
-### 9. `sereneDBErrorHandler(error)`
-- A centralized function to handle errors during storage, retrieval, and search operations in SereneDB.
+#### `async delete(id)`
+Delete a vector by ID.
 
-### 10. `clearSereneDBCache()`
-- Clear localStorage cache when necessary, such as during a reset or to free up space in SereneDB.
+```javascript
+await db.delete('my-id');
+```
 
-### 11. `optimizeSereneDBSearchPerformance()`
-- Apply optimizations to SereneDB’s vector search algorithm based on data size and query complexity.
+#### `async deleteMany(ids)`
+Delete multiple vectors.
 
-### 12. `unloadSereneDBDataFromMemory()`
-- Unload vector data from SereneDB’s in-memory storage when it is no longer needed to manage memory usage efficiently.
+```javascript
+await db.deleteMany(['id1', 'id2', 'id3']);
+```
 
-## Contribution
+#### `async clear()`
+Remove all vectors from the database.
 
-SereneDB is an open-source project, and contributions are welcome. If you would like to contribute, please fork the repository, create a new branch, and submit a pull request. Ensure that your code follows the established coding standards and includes relevant tests.
+```javascript
+await db.clear();
+```
 
-## License
+### Search Operations
 
-SereneDB is released under the [MIT License](LICENSE). Feel free to use, modify, and distribute this project.
+#### `performSereneDBVectorSearch(queryVector, options)`
+Perform similarity search on in-memory data.
+
+```javascript
+const results = db.performSereneDBVectorSearch([0.1, 0.2, 0.3], {
+    limit: 10,           // Max results (default: 10)
+    threshold: 0.5,      // Min similarity (default: 0)
+    metric: 'cosine'     // 'cosine', 'euclidean', or 'dot'
+});
+```
+
+**Distance Metrics:**
+- `'cosine'` - Cosine similarity (default). Range: -1 to 1. Higher is more similar.
+- `'euclidean'` - Euclidean distance. Lower is more similar.
+- `'dot'` - Dot product. Higher is more similar.
+
+#### `setSearchConfig(config)`
+Set default search parameters.
+
+```javascript
+db.setSearchConfig({
+    limit: 20,
+    metric: 'euclidean',
+    threshold: 0.1
+});
+```
+
+#### `optimizeSereneDBSearchPerformance(options)`
+Apply performance optimizations.
+
+```javascript
+db.optimizeSereneDBSearchPerformance({
+    useQuantization: true,       // Reduce memory usage
+    quantizationBits: 8,         // Quantization precision
+    useApproximateSearch: true,  // For large datasets
+    approximateThreshold: 1000   // When to use approximate search
+});
+```
+
+### Cache Management
+
+#### `async loadCacheFromSereneDB()`
+Load cached data from localStorage into memory.
+
+```javascript
+await db.loadCacheFromSereneDB();
+```
+
+#### `updateCacheInSereneDB()`
+Save current in-memory data to localStorage cache.
+
+```javascript
+db.updateCacheInSereneDB();
+```
+
+#### `clearSereneDBCache()`
+Clear the localStorage cache.
+
+```javascript
+db.clearSereneDBCache();
+```
+
+#### `async syncSereneDBCacheAndDatabase()`
+Synchronize all storage layers (IndexedDB ↔ localStorage ↔ memory).
+
+```javascript
+await db.syncSereneDBCacheAndDatabase();
+```
+
+### Memory Management
+
+#### `unloadSereneDBDataFromMemory(saveToCache = true)`
+Clear memory and optionally save to cache.
+
+```javascript
+db.unloadSereneDBDataFromMemory(true);  // Save to cache before unloading
+```
+
+#### `getMemoryStats()`
+Get memory usage statistics.
+
+```javascript
+const stats = db.getMemoryStats();
+console.log(stats);
+// { itemCount: 100, estimatedBytes: 12800, estimatedKB: 12.5, estimatedMB: 0.01 }
+```
+
+### Utility Methods
+
+#### `count()`
+Get the number of vectors in memory.
+
+```javascript
+const total = db.count();
+```
+
+#### `getAllIds()`
+Get all vector IDs.
+
+```javascript
+const ids = db.getAllIds();
+```
+
+#### `getAll()`
+Get all vectors.
+
+```javascript
+const vectors = db.getAll();
+```
+
+#### `getMetadata()`
+Get database metadata.
+
+```javascript
+const meta = db.getMetadata();
+// { vectorDimension: 128, itemCount: 100, lastSync: 1234567890 }
+```
+
+#### `export()`
+Export database to JSON.
+
+```javascript
+const data = db.export();
+// { dbName: 'myDB', data: [...], metadata: {...}, searchConfig: {...} }
+```
+
+#### `async import(data)`
+Import data from JSON export.
+
+```javascript
+await db.import(exportedData);
+```
+
+#### `async batchInsert(vectors, onProgress, batchSize)`
+Insert large amounts of data with progress tracking.
+
+```javascript
+await db.batchInsert(vectors, (current, total) => {
+    console.log(`Progress: ${current}/${total}`);
+}, 100);
+```
+
+### Lifecycle
+
+#### `close()`
+Close the database connection.
+
+```javascript
+db.close();
+```
+
+#### `async destroy()`
+Permanently delete the database.
+
+```javascript
+await db.destroy();
+```
+
+### Error Handling
+
+#### `sereneDBErrorHandler(error)`
+Centralized error handler. All errors are logged and wrapped in a SereneDBError.
+
+```javascript
+try {
+    await db.saveDataToSereneDB(invalidData);
+} catch (error) {
+    console.error(error.message);  // [SereneDB 2024-01-01T00:00:00.000Z] Error message
+}
+```
+
+### Data Integrity
+
+#### `handleSereneDBAbruptClosure()`
+Automatically called on page unload to save data to emergency cache.
+
+#### `async recoverFromEmergencySave()`
+Recover data from emergency save after abrupt closure.
+
+```javascript
+const recovered = await db.recoverFromEmergencySave();
+if (recovered) {
+    console.log('Data recovered from emergency save!');
+}
+```
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        SereneDB                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │   Memory     │◄──►│ localStorage │◄──►│  IndexedDB   │  │
+│  │   (Fast)     │    │   (Cache)    │    │ (Persistent) │  │
+│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│         ▲                   ▲                    ▲          │
+│         │                   │                    │          │
+│         └───────────────────┴────────────────────┘          │
+│                      Auto Sync                               │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 📊 Performance Tips
+
+1. **Use batch operations** for inserting large datasets
+2. **Call `optimizeSereneDBSearchPerformance()`** after loading data
+3. **Use appropriate distance metrics** for your use case
+4. **Set thresholds** to filter low-similarity results early
+5. **Unload memory** when not actively searching
+
+## 🧪 Testing
+
+Open `test.html` in a browser to run the test suite.
+
+```bash
+# If you have a local server
+open test.html
+# or
+npx serve .
+```
+
+## 📝 Data Structure
+
+Each vector entry has the following structure:
+
+```javascript
+{
+    id: 'unique-string-id',     // Required: Unique identifier
+    vector: [0.1, 0.2, ...],    // Required: Array of numbers
+    metadata: {                 // Optional: Any additional data
+        title: 'Document Title',
+        category: 'tech',
+        // ... any other fields
+    },
+    timestamp: 1234567890       // Auto-generated: Creation/update time
+}
+```
+
+## 🤝 Contributing
+
+SereneDB is open-source! Contributions are welcome:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+SereneDB is released under the [MIT License](LICENSE).
+
+---
+
+Made with ❤️ for the vector search community
