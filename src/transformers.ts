@@ -197,7 +197,10 @@ function waitWithAbort<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T>
 }
 
 function report(options: OperationOptions, progress: ProgressEvent): void {
-  if (!options.signal?.aborted) options.onProgress?.(progress);
+  if (!options.signal?.aborted) {
+    // Observers must not invalidate model initialization or inference results.
+    try { options.onProgress?.(progress); } catch { /* Progress is best-effort. */ }
+  }
 }
 
 const yieldTurn = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -366,21 +369,17 @@ export class TransformersEmbedding {
     }
     checkAbort(options.signal);
     const pipeline = await loadWithEnvironment(runtime, this.config, options, async () => {
-      let progressError: unknown;
-      let progressFailed = false;
       const progress_callback = (detail: unknown) => {
         const progress = detail as { loaded?: number; total?: number } | null;
         const total = typeof progress?.total === 'number' && Number.isFinite(progress.total) && progress.total > 0 ? progress.total : 1;
         const completed = typeof progress?.loaded === 'number' && Number.isFinite(progress.loaded) ? Math.max(0, Math.min(progress.loaded, total)) : 0;
-        try { report(options, { phase: 'loading-model', completed, total, detail }); }
-        catch (error) { progressFailed = true; progressError = error; }
+        report(options, { phase: 'loading-model', completed, total, detail });
       };
       const load = async (selected: 'wasm' | 'webgpu'): Promise<EmbeddingPipeline> => {
         const settings = { revision: this.config.revision, dtype: this.config.dtype, device: selected, local_files_only: !this.config.allowRemoteModels, progress_callback };
         const raw = await runtime.AutoTokenizer.from_pretrained(this.config.model, settings);
         checkAbort(options.signal);
         this.assertOpen();
-        if (progressFailed) throw progressError;
         if (typeof raw !== 'function') invalid('Model does not provide a callable text tokenizer for feature extraction.', 'EMBEDDING_MODEL');
         const limit = raw.model_max_length;
         this.effectiveMaxTokens = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.min(this.config.maxTokens, limit) : this.config.maxTokens;
@@ -397,7 +396,6 @@ export class TransformersEmbedding {
         try {
           checkAbort(options.signal);
           this.assertOpen();
-          if (progressFailed) throw progressError;
           return new runtime.FeatureExtractionPipeline({ task: 'feature-extraction', tokenizer, model });
         } catch (error) {
           await model.dispose();
@@ -409,7 +407,6 @@ export class TransformersEmbedding {
         catch (error) {
           checkAbort(options.signal);
           this.assertOpen();
-          if (progressFailed) throw progressError;
           this.fallbackReason = `WebGPU model load failed; retrying the same dtype on WASM: ${error instanceof Error ? error.message : String(error)}`;
           report(options, { phase: 'loading-model', completed: 0, total: 1, detail: { fallback: this.fallbackReason } });
           device = 'wasm';
@@ -419,18 +416,12 @@ export class TransformersEmbedding {
       catch (cause) {
         checkAbort(options.signal);
         this.assertOpen();
-        if (progressFailed) throw progressError;
         if (cause instanceof SereneDBError) throw cause;
         throw new SereneDBError(`Unable to load embedding model '${this.config.model}' at revision '${this.config.revision}' with dtype '${this.config.dtype}' on WASM. Check the model's ONNX artifact/dtype and feature-extraction support; q8/other quantizations are not available for every model. For offline use, preload or deploy all tokenizer, model, and matching WASM assets. ${cause instanceof Error ? cause.message : String(cause)}`, 'EMBEDDING_MODEL', { cause });
       }
     });
     this.device = device;
-    try {
-      report(options, { phase: 'loading-model', completed: 1, total: 1, detail: { device, dtype: this.config.dtype, version: this.version, fallback: this.fallbackReason } });
-    } catch (error) {
-      await pipeline.dispose();
-      throw error;
-    }
+    report(options, { phase: 'loading-model', completed: 1, total: 1, detail: { device, dtype: this.config.dtype, version: this.version, fallback: this.fallbackReason } });
     return pipeline;
   }
 
@@ -499,7 +490,10 @@ export class TransformersEmbedding {
       if (cause instanceof SereneDBError) throw cause;
       throw new SereneDBError(`Feature extraction failed for '${this.config.model}' using '${this.config.pooling}' pooling. Check the model card and its Transformers.js feature-extraction/pooling support. ${cause instanceof Error ? cause.message : String(cause)}`, 'EMBEDDING_MODEL', { cause });
     } finally {
-      if (output && typeof output === 'object' && typeof (output as { dispose?: unknown }).dispose === 'function') await (output as { dispose(): unknown }).dispose();
+      if (output && typeof output === 'object' && typeof (output as { dispose?: unknown }).dispose === 'function') {
+        try { await (output as { dispose(): unknown }).dispose(); }
+        catch { if (!this.warnings.includes('Unable to release an inference output tensor.')) this.warnings.push('Unable to release an inference output tensor.'); }
+      }
     }
   }
 }

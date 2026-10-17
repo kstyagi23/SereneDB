@@ -101,8 +101,9 @@ test('config is populated, serializable, and does not guess a quantized artifact
 });
 
 test('config rejects malformed, unsupported, and unbounded options', () => {
+  assert.throws(() => transformersEmbedder({} as never), code('INVALID_INPUT'));
   for (const options of [
-    null, [], {}, { model: '' }, { model: 12 }, { model: ' model' }, { revision: '' },
+    null, [], { model: '' }, { model: 12 }, { model: ' model' }, { revision: '' },
     { revision: null }, { provider: 'other' }, { dtype: 'auto' }, { dtype: 'typo' },
     { device: 'cpu' }, { pooling: 'none' }, { pooling: 'max' }, { normalize: 1 },
     { allowRemoteModels: 'false' }, { queryPrefix: null }, { documentPrefix: 2 },
@@ -422,14 +423,14 @@ test('WebGPU adapter probing/load failure falls back to WASM without changing dt
   }
 });
 
-test('progress callback failures dispose completed or partially loaded pipelines', async () => {
+test('progress observer failures do not change loading or inference results', async () => {
   const fake = fakeRuntime();
   const adapter = embedding(fake);
-  await assert.rejects(adapter.preload({ onProgress: event => { if (event.phase === 'loading-model' && event.completed === 1) throw new Error('consumer callback'); } }), /consumer callback/);
-  assert.equal(fake.counts().disposed, 1);
-  assert.equal(adapter.runtimeInfo().loaded, false);
-  await adapter.preload();
-  assert.equal(fake.counts().pipelines, 2);
+  await adapter.preload({ onProgress: () => { throw new Error('consumer callback'); } });
+  assert.equal(fake.counts().disposed, 0);
+  assert.equal(adapter.runtimeInfo().loaded, true);
+  await adapter.encodeQuery('query', { onProgress: () => { throw undefined; } });
+  assert.equal(fake.counts().pipelines, 1);
   await adapter.dispose();
 });
 
