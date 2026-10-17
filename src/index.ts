@@ -1,5 +1,6 @@
 import { LocalConnection, WorkerConnection } from './rpc.js';
 import type { Connection } from './rpc.js';
+import { checkAbort, SereneDBError } from './errors.js';
 import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, Metadata, OpenOptions, OperationOptions, SearchOptions, SearchResponse, StoredRecord } from './types.js';
 export type * from './types.js';
 export { SereneDBError } from './errors.js';
@@ -9,12 +10,23 @@ export class Collection {
   constructor(private connection: Connection, public readonly name: string, public readonly generation: string) {}
   private call<T>(method: string, args: unknown[] = [], options: OperationOptions = {}): Promise<T> { return this.connection.call<T>(method, [this.name, this.generation, ...args], options); }
   upsert(documents: DocumentInput | DocumentInput[], options: OperationOptions = {}): Promise<{ count: number; upserted: number; revision: number; generation: string }> {
-    const owned = structuredClone(Array.isArray(documents) ? documents : [documents]);
-    return this.call('upsert', [owned], options);
+    try {
+      checkAbort(options.signal);
+      const inputs = Array.isArray(documents) ? documents : [documents];
+      if (inputs.length > 100000) throw new SereneDBError('Atomic batch has too many documents. Use ingest() for streaming.', 'BATCH_TOO_LARGE');
+      let bytes = 0;
+      for (const item of inputs) {
+        bytes += (item?.text?.length ?? 0) * 2 + (item?.vector?.length ?? 0) * 4;
+        if (bytes > 64 * 1024 * 1024) throw new SereneDBError('Atomic batch exceeds 64 MiB. Use ingest() for streaming.', 'BATCH_TOO_LARGE');
+      }
+      return this.call('upsert', [structuredClone(inputs)], options);
+    } catch (error) { return Promise.reject(error); }
   }
   search(options: SearchOptions, operation: OperationOptions = {}): Promise<SearchResponse> {
-    const { signal, ...query } = options;
-    return this.call('search', [structuredClone(query)], { ...operation, signal: signal ?? operation.signal });
+    try {
+      const { signal, ...query } = options;
+      return this.call('search', [structuredClone(query)], { ...operation, signal: signal ?? operation.signal });
+    } catch (error) { return Promise.reject(error); }
   }
   get(id: string, options: OperationOptions = {}): Promise<StoredRecord | null> { return this.call('get', [id], options); }
   async has(id: string): Promise<boolean> { return Boolean(await this.get(id)); }

@@ -15,7 +15,7 @@ async function open() {
   if (!db) db = await SereneDB.open('SereneDB-Lab');
   if (mode !== currentMode) {
     collection = await db.collection(mode === 'semantic' ? 'semantic' : 'lexical', mode === 'semantic' ? {
-      embedder: transformersEmbedder({ model: 'Xenova/all-MiniLM-L6-v2', dtype: 'q8', device: 'auto', pooling: 'mean', normalize: true }),
+      embedder: transformersEmbedder({ model: 'Xenova/all-MiniLM-L6-v2', revision: '751bff37182d3f1213fa05d7196b954e230abad9', dtype: 'q8', device: 'auto', pooling: 'mean', normalize: true }),
     } : { dimension: 8, index: 'flat' });
     currentMode = mode;
   }

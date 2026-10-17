@@ -19,7 +19,17 @@ scope.onmessage = event => {
     if (!engine) throw new Error('Database worker has not initialized.');
     return engine.call(method, args, { signal: controller.signal, onProgress: progress => scope.postMessage({ id, progress }) });
   };
-  execute().then(result => scope.postMessage({ id, result }), error => {
+  execute().then(result => {
+    const buffers = new Set<ArrayBuffer>();
+    const collect = (value: unknown, depth = 0) => {
+      if (depth > 8 || value === null || typeof value !== 'object') return;
+      if (value instanceof Float32Array) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return; }
+      if (Array.isArray(value)) for (const entry of value) collect(entry, depth + 1);
+      else for (const [key, entry] of Object.entries(value)) if (key === 'vector' || key === 'results') collect(entry, depth + 1);
+    };
+    collect(result);
+    scope.postMessage({ id, result }, Array.from(buffers));
+  }, error => {
     const value: SerializedError = { name: error?.name ?? 'Error', message: error?.message ?? String(error), ...(error?.code ? { code: error.code } : {}) };
     scope.postMessage({ id, error: value });
   }).finally(() => controllers.delete(id));

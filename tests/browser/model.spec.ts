@@ -6,7 +6,7 @@ test('real model embeddings, schema, cached assets, and offline worker restart',
   const name = `model-${crypto.randomUUID()}`;
   const result = await page.evaluate(async name => {
     const db = await window.SereneDB.open(name);
-    const config = window.transformersEmbedder({ model: 'Xenova/all-MiniLM-L6-v2', dtype: 'q8', device: 'wasm', batchSize: 4 });
+    const config = window.transformersEmbedder({ model: 'Xenova/all-MiniLM-L6-v2', revision: '751bff37182d3f1213fa05d7196b954e230abad9', dtype: 'q8', device: 'wasm', batchSize: 4 });
     const docs = await db.collection('docs', { embedder: config });
     await docs.preload();
     await docs.upsert([

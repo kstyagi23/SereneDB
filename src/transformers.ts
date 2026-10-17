@@ -222,7 +222,9 @@ async function tensorRows(output: unknown, count: number, normalize: boolean): P
     const values = Array.isArray(data) ? data.slice(start, start + dims[1]) : data.subarray(start, start + dims[1]);
     if (!values.some(value => typeof value === 'number' && value !== 0)) invalid('Model returned an embedding with a zero norm.', 'EMBEDDING_OUTPUT');
     try {
-      rows.push(prepareVector(values, normalize ? 'cosine' : 'dot'));
+      const vector = prepareVector(values, normalize ? 'cosine' : 'dot');
+      if (!vector.some(value => value !== 0)) invalid('Embedding values underflowed to a zero float32 vector.');
+      rows.push(vector);
     } catch (cause) {
       throw new SereneDBError('Model returned nonfinite, invalid, or unrepresentable float32 embedding values.', 'EMBEDDING_OUTPUT', { cause });
     }
@@ -346,6 +348,7 @@ export class TransformersEmbedding {
   }
 
   private async initialize(options: OperationOptions): Promise<EmbeddingPipeline> {
+    this.fallbackReason = null;
     report(options, { phase: 'loading-model', completed: 0, total: 1, detail: { model: this.config.model, revision: this.config.revision, warnings: [...this.warnings] } });
     checkAbort(options.signal);
     const runtime = await this.loadRuntime();
@@ -364,18 +367,20 @@ export class TransformersEmbedding {
     checkAbort(options.signal);
     const pipeline = await loadWithEnvironment(runtime, this.config, options, async () => {
       let progressError: unknown;
+      let progressFailed = false;
       const progress_callback = (detail: unknown) => {
         const progress = detail as { loaded?: number; total?: number } | null;
         const total = typeof progress?.total === 'number' && Number.isFinite(progress.total) && progress.total > 0 ? progress.total : 1;
         const completed = typeof progress?.loaded === 'number' && Number.isFinite(progress.loaded) ? Math.max(0, Math.min(progress.loaded, total)) : 0;
         try { report(options, { phase: 'loading-model', completed, total, detail }); }
-        catch (error) { progressError = error; }
+        catch (error) { progressFailed = true; progressError = error; }
       };
       const load = async (selected: 'wasm' | 'webgpu'): Promise<EmbeddingPipeline> => {
         const settings = { revision: this.config.revision, dtype: this.config.dtype, device: selected, local_files_only: !this.config.allowRemoteModels, progress_callback };
         const raw = await runtime.AutoTokenizer.from_pretrained(this.config.model, settings);
         checkAbort(options.signal);
-        if (progressError !== undefined) throw progressError;
+        this.assertOpen();
+        if (progressFailed) throw progressError;
         if (typeof raw !== 'function') invalid('Model does not provide a callable text tokenizer for feature extraction.', 'EMBEDDING_MODEL');
         const limit = raw.model_max_length;
         this.effectiveMaxTokens = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.min(this.config.maxTokens, limit) : this.config.maxTokens;
@@ -384,14 +389,15 @@ export class TransformersEmbedding {
           const encoding = Reflect.apply(target, receiver, [args[0], { ...args[1], truncation: true, max_length: this.config.maxTokens }]);
           if (args[1]?.return_tensor !== false) {
             const dims = encoding?.input_ids?.dims;
-            if (!Array.isArray(dims) || dims.length !== 2 || !Number.isInteger(dims[1]) || dims[1] < 1 || dims[1] > this.config.maxTokens) invalid('Tokenizer did not honor maxTokens or returned unsupported model inputs.', 'EMBEDDING_MODEL');
+            if (!Array.isArray(dims) || dims.length !== 2 || dims[0] !== args[0].length || !Number.isInteger(dims[1]) || dims[1] < 1 || dims[1] > this.config.maxTokens || dims[0] * dims[1] > this.config.batchTokens) invalid('Tokenizer did not honor maxTokens/batchTokens or returned unsupported model inputs.', 'EMBEDDING_MODEL');
           }
           return encoding;
         } });
         const model = await runtime.AutoModel.from_pretrained(this.config.model, settings);
         try {
           checkAbort(options.signal);
-          if (progressError !== undefined) throw progressError;
+          this.assertOpen();
+          if (progressFailed) throw progressError;
           return new runtime.FeatureExtractionPipeline({ task: 'feature-extraction', tokenizer, model });
         } catch (error) {
           await model.dispose();
@@ -402,7 +408,8 @@ export class TransformersEmbedding {
         try { return await load('webgpu'); }
         catch (error) {
           checkAbort(options.signal);
-          if (progressError !== undefined) throw progressError;
+          this.assertOpen();
+          if (progressFailed) throw progressError;
           this.fallbackReason = `WebGPU model load failed; retrying the same dtype on WASM: ${error instanceof Error ? error.message : String(error)}`;
           report(options, { phase: 'loading-model', completed: 0, total: 1, detail: { fallback: this.fallbackReason } });
           device = 'wasm';
@@ -411,13 +418,19 @@ export class TransformersEmbedding {
       try { return await load('wasm'); }
       catch (cause) {
         checkAbort(options.signal);
-        if (progressError !== undefined) throw progressError;
+        this.assertOpen();
+        if (progressFailed) throw progressError;
         if (cause instanceof SereneDBError) throw cause;
         throw new SereneDBError(`Unable to load embedding model '${this.config.model}' at revision '${this.config.revision}' with dtype '${this.config.dtype}' on WASM. Check the model's ONNX artifact/dtype and feature-extraction support; q8/other quantizations are not available for every model. For offline use, preload or deploy all tokenizer, model, and matching WASM assets. ${cause instanceof Error ? cause.message : String(cause)}`, 'EMBEDDING_MODEL', { cause });
       }
     });
     this.device = device;
-    report(options, { phase: 'loading-model', completed: 1, total: 1, detail: { device, dtype: this.config.dtype, version: this.version, fallback: this.fallbackReason } });
+    try {
+      report(options, { phase: 'loading-model', completed: 1, total: 1, detail: { device, dtype: this.config.dtype, version: this.version, fallback: this.fallbackReason } });
+    } catch (error) {
+      await pipeline.dispose();
+      throw error;
+    }
     return pipeline;
   }
 
@@ -433,11 +446,13 @@ export class TransformersEmbedding {
     const rows: Float32Array[] = [];
     let batch: string[] = [];
     let longest = 0;
+    let lengthsKnown = true;
     const flush = async () => {
       if (!batch.length) return;
       rows.push(...await this.infer(pipeline, batch, options));
       batch = [];
       longest = 0;
+      lengthsKnown = true;
       report(options, { phase: 'embedding', completed: rows.length, total: texts.length });
       await yieldTurn();
       checkAbort(options.signal);
@@ -450,12 +465,14 @@ export class TransformersEmbedding {
       const ids = pipeline.tokenizer([text], { padding: false, truncation: true, max_length: this.config.maxTokens, return_tensor: false }).input_ids;
       // If an alternate tokenizer cannot expose lengths, budget its entire truncation limit.
       let length = this.config.maxTokens;
-      if (Array.isArray(ids) && ids.length === 1 && Array.isArray(ids[0])) length = ids[0].length;
+      const known = Array.isArray(ids) && ids.length === 1 && Array.isArray(ids[0]);
+      if (known) length = (ids as unknown[][])[0].length;
       if (!Number.isInteger(length) || length < 1 || length > this.config.maxTokens) invalid('Tokenizer returned an invalid or untruncated token sequence.', 'EMBEDDING_MODEL');
-      const mixedLastToken = this.config.pooling === 'last_token' && pipeline.tokenizer.padding_side !== 'left' && batch.length > 0 && length !== longest;
+      const mixedLastToken = this.config.pooling === 'last_token' && pipeline.tokenizer.padding_side !== 'left' && batch.length > 0 && (!known || !lengthsKnown || length !== longest);
       if (batch.length >= this.config.batchSize || Math.max(longest, length) * (batch.length + 1) > this.config.batchTokens || mixedLastToken) await flush();
       batch.push(text);
       longest = Math.max(longest, length);
+      lengthsKnown &&= known;
     }
     await flush();
     checkAbort(options.signal);

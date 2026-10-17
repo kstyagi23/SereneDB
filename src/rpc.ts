@@ -68,7 +68,16 @@ export class WorkerConnection implements Connection {
         options.signal.addEventListener('abort', pending.abort, { once: true });
       }
       this.pending.set(id, pending);
-      try { this.worker.postMessage({ id, method, args }); }
+      const buffers = new Set<ArrayBuffer>();
+      const collect = (value: unknown, depth = 0) => {
+        if (depth > 8 || value === null || typeof value !== 'object') return;
+        if (value instanceof Float32Array || value instanceof Float64Array) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return; }
+        if (Array.isArray(value)) { for (const entry of value) collect(entry, depth + 1); }
+        else if ('vector' in value) collect((value as { vector: unknown }).vector, depth + 1);
+      };
+      // Collection owns its cloned input buffers, so transfer never detaches caller data.
+      if (method === 'upsert' || method === 'search') collect(args);
+      try { this.worker.postMessage({ id, method, args }, Array.from(buffers)); }
       catch (error) { this.pending.delete(id); if (pending.abort) options.signal?.removeEventListener('abort', pending.abort); reject(error); }
     });
   }

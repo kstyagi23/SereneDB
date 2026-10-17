@@ -160,12 +160,17 @@ export class Engine {
   }
 
   private async upsert(name: string, generation: string, inputs: DocumentInput[], options: OperationOptions): Promise<unknown> {
-    const entry = await this.working(name, generation, options);
+    const state = await this.storage.refreshState(name, options.signal);
+    if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
+    const resident = this.entries.get(name);
+    const cached = resident?.state.generation === generation && resident.state.revision === state.revision ? resident : undefined;
+    const entry = cached ?? { state, records: new Map<string, Header>(), index: null, lexical: new LexicalIndex() };
+    if (cached?.index?.stats().needsRebuild) { await cached.index.compact({ signal: options.signal }); this.scanner?.clear(); }
     const records = await this.prepare(entry, inputs, options);
     const result = await this.storage.mutate(name, { upserts: records }, generation, options.signal);
     this.scanner?.clear();
     // Storage has committed. Cancellation or a failed derived index cannot undo that acknowledgement.
-    if (result.state.revision === entry.state.revision + 1 && result.state.count >= entry.records.size) {
+    if (cached && result.state.revision === entry.state.revision + 1 && result.state.count >= entry.records.size) {
       try {
         entry.index ??= result.state.schema.dimension === null ? null : new VectorIndex(result.state.schema.dimension, result.state.schema.metric, result.state.schema.index);
         let lastYield = performance.now();
@@ -177,7 +182,7 @@ export class Engine {
         }
         entry.state = result.state;
       } catch { this.entries.delete(name); }
-    } else if (result.state.revision !== entry.state.revision) this.entries.delete(name);
+    } else if (!cached || result.state.revision !== entry.state.revision) this.entries.delete(name);
     return { count: result.state.count, upserted: result.upserted.length, revision: result.state.revision, generation: result.state.generation };
   }
 
@@ -374,14 +379,21 @@ export class Engine {
       if (!Array.isArray(collection.records)) invalid('Import records must be an array.');
       const records = collection.records.map(record => {
         validName(record.id, 'Document ID');
-        if (record.text !== undefined && typeof record.text !== 'string') invalid('Imported text must be a string.');
+        if (record.text !== undefined && (typeof record.text !== 'string' || record.text.length > 2000000)) invalid('Imported text must be a string of at most 2 million characters.');
+        if (record.timestamp !== undefined && !Number.isFinite(record.timestamp)) invalid('Imported timestamps must be finite.');
         return { id: record.id, vector: prepareVector(record.vector, validated.metric, validated.dimension), metadata: prepareMetadata(record.metadata), text: record.text, timestamp: record.timestamp };
       });
       const dimensions = new Set(records.map(record => record.vector.length));
       if (dimensions.size > 1) invalid('Imported collection contains mixed dimensions.');
+      if (schema.embedding && schema.embedding.fingerprint !== validated.embedding?.fingerprint) invalid('Import embedding-space fingerprint does not match its config.', 'SCHEMA_MISMATCH');
       return { name: collection.state.name, schema: validated, records };
     });
     if (new Set(prepared.map(collection => collection.name)).size !== prepared.length) invalid('Import collection names must be unique.');
+    const existing = new Map((await this.storage.listCollections()).map(state => [state.name, state]));
+    for (const collection of prepared) {
+      const persisted = existing.get(collection.name);
+      if (persisted && (persisted.schema.metric !== collection.schema.metric || persisted.schema.dimension !== null && collection.schema.dimension !== null && persisted.schema.dimension !== collection.schema.dimension || (persisted.schema.embedding?.fingerprint ?? null) !== (collection.schema.embedding?.fingerprint ?? null))) invalid(`Import schema does not match existing collection ${collection.name}.`, 'SCHEMA_MISMATCH');
+    }
     let committed = 0;
     for (const collection of prepared) {
       checkAbort(options.signal);
