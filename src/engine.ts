@@ -24,13 +24,13 @@ export class Engine {
   private queue: Promise<unknown> = Promise.resolve();
   private pending = 0;
   private closed = false;
-  private readonly maxResidentCollections = 2;
-  private constructor(private storage: Storage, private scanner: SIMDScanner | null) {}
+  private constructor(private storage: Storage, private scanner: SIMDScanner | null, private readonly maxResidentCollections: number) {}
 
   static async open(name: string, options: OpenOptions = {}): Promise<Engine> {
+    integer(options.maxResidentCollections ?? 2, 'maxResidentCollections', 1, 64);
     const storage = await Storage.open(name, options);
     const scanner = options.wasm === false ? null : await SIMDScanner.create();
-    return new Engine(storage, scanner);
+    return new Engine(storage, scanner, options.maxResidentCollections ?? 2);
   }
 
   call(method: string, args: unknown[] = [], options: OperationOptions = {}): Promise<unknown> {
@@ -53,6 +53,7 @@ export class Engine {
     if (generation && state.generation !== generation) throw new SereneDBError('Collection was dropped or replaced. Open a new collection handle.', 'STALE_HANDLE');
     const cached = this.entries.get(name);
     if (cached && cached.state.generation === state.generation && cached.state.revision === state.revision) { this.entries.delete(name); this.entries.set(name, cached); return cached; }
+    if (cached && cached.state.generation !== state.generation) { await this.models.get(cached.state.generation)?.dispose(); this.models.delete(cached.state.generation); }
     checkAbort(options.signal);
     const snapshot = await this.storage.readCollection(name, options.signal);
     if (generation && snapshot.state.generation !== generation) throw new SereneDBError('Collection was replaced.', 'STALE_HANDLE');
@@ -147,6 +148,7 @@ export class Engine {
     checkAbort(options.signal);
     if (texts.length) {
       const vectors = await this.model(entry).encodeDocuments(texts, options);
+      if (vectors.length !== texts.length) throw new SereneDBError('Embedding output count does not match input documents.', 'INVALID_EMBEDDING');
       for (let i = 0; i < vectors.length; i++) {
         const vector = prepareVector(vectors[i], entry.state.schema.metric, dimension);
         dimension ??= vector.length;

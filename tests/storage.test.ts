@@ -3,7 +3,7 @@ import { forceCloseDatabase, IDBDatabase, IDBObjectStore } from 'fake-indexeddb'
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { Storage } from '../src/storage.js';
-import type { IndexSnapshot, OpenOptions, PreparedRecord } from '../src/types.js';
+import type { IndexSnapshot, OpenOptions, PreparedRecord, TransformersConfig } from '../src/types.js';
 import { collectionSchema } from '../src/validation.js';
 
 let sequence = 0;
@@ -118,6 +118,46 @@ test('explicit schema compatibility uses persisted state and atomically pins a r
   await assert.rejects(db.ensureCollection('docs', collectionSchema({ dimension: 3, metric: 'dot', index: 'flat' })), code('SCHEMA_MISMATCH'));
   await assert.rejects(db.mutate('docs', { upserts: [record('a', [1, 2, 3])] }), code('SCHEMA_MISMATCH'));
   assert.equal((await db.refreshState('docs')).count, 0);
+});
+
+test('embedding schema compatibility persists identity while runtime-only config choices are not a different space', async t => {
+  const db = await storage(t);
+  const config: TransformersConfig = {
+    provider: 'transformers', model: 'test/model', revision: 'pinned-revision', dtype: 'fp32', device: 'wasm',
+    pooling: 'mean', normalize: true, queryPrefix: 'query: ', documentPrefix: 'passage: ',
+    maxTokens: 128, batchSize: 8, batchTokens: 1024, allowRemoteModels: true,
+  };
+  const initial = collectionSchema({ embedder: config });
+  const created = await db.ensureCollection('docs', initial);
+  config.queryPrefix = 'changed: ';
+  await assert.rejects(db.ensureCollection('docs', collectionSchema({ embedder: config })), code('SCHEMA_MISMATCH'));
+  config.queryPrefix = 'query: ';
+  config.device = 'webgpu';
+  config.batchSize = 16;
+  const restored = await db.ensureCollection('docs', collectionSchema({ embedder: config }));
+  assert.equal(restored.schema.embedding?.fingerprint, created.schema.embedding?.fingerprint);
+  assert.equal(restored.schema.embedding?.config.device, 'wasm');
+  assert.equal((await db.ensureCollection('docs', collectionSchema(), { explicit: {} })).schema.embedding?.config.model, 'test/model');
+  await assert.rejects(db.ensureCollection('docs', collectionSchema(), { explicit: { embedding: true } }), code('SCHEMA_MISMATCH'));
+  const raw = await rawOpen(db.name);
+  t.after(() => raw.close());
+  const persisted = await rawRead(raw, 'collections', 'docs');
+  persisted.schema.embedding.config.queryPrefix = 'tampered: ';
+  await rawWrite(raw, ['collections'], tx => tx.objectStore('collections').put(persisted));
+  await assert.rejects(db.refreshState('docs'), code('STORAGE_CORRUPT'));
+});
+
+test('schema and explicit flags are owned snapshots, not mutable asynchronous inputs', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', schema());
+  const options = { explicit: { metric: false } };
+  const pending = db.ensureCollection('docs', collectionSchema(), options);
+  options.explicit.metric = true;
+  assert.equal((await pending).schema.metric, 'dot');
+  const input = schema();
+  const create = db.ensureCollection('other', input);
+  input.index.m = 32;
+  assert.equal((await create).schema.index.m, 16);
 });
 
 test('synchronous enqueue DataCloneError rolls back earlier puts, count, revision, and inferred dimension', async t => {
@@ -327,10 +367,32 @@ test('dropped/recreated collections reject stale mutations and stale drops', asy
   await db.dropCollection('docs', first.generation);
   const replacement = await db.ensureCollection('docs', schema());
   assert.notEqual(replacement.generation, first.generation);
+  await assert.rejects(db.get('docs', 'absent', undefined, first.generation), code('COLLECTION_STALE'));
   await assert.rejects(db.mutate('docs', { upserts: [record('stale')] }, first.generation), code('COLLECTION_STALE'));
   await assert.rejects(db.dropCollection('docs', first.generation), code('COLLECTION_STALE'));
   assert.equal((await db.refreshState('docs')).count, 0);
   assert.equal(await db.checkpoint('docs', first.generation, first.revision, snapshot()), false);
+});
+
+test('persisted nonfinite vectors, zero-norm cosine vectors, and invalid schema fields fail closed', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', collectionSchema({ dimension: 2 }));
+  await db.mutate('docs', { upserts: [record('a')] });
+  const raw = await rawOpen(db.name);
+  t.after(() => raw.close());
+  const persisted = await rawRead(raw, 'records', ['docs', 'a']);
+  persisted.vector[0] = NaN;
+  await rawWrite(raw, ['records'], tx => tx.objectStore('records').put(persisted));
+  await assert.rejects(db.get('docs', 'a'), code('STORAGE_CORRUPT'));
+  await assert.rejects(db.readCollection('docs'), code('STORAGE_CORRUPT'));
+  persisted.vector = new Float32Array([0, 0]);
+  await rawWrite(raw, ['records'], tx => tx.objectStore('records').put(persisted));
+  await assert.rejects(db.get('docs', 'a'), code('STORAGE_CORRUPT'));
+  const state = await rawRead(raw, 'collections', 'docs');
+  state.schema.index.m = 0;
+  await rawWrite(raw, ['collections'], tx => tx.objectStore('collections').put(state));
+  await assert.rejects(db.refreshState('docs'), code('STORAGE_CORRUPT'));
+  await assert.rejects(db.listCollections(), code('STORAGE_CORRUPT'));
 });
 
 test('checkpoints require the same collection generation/revision and are invalidated atomically by writes', async t => {

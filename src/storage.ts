@@ -1,6 +1,6 @@
 import { checkAbort, invalid, SereneDBError } from './errors.js';
-import type { CollectionSchema, CollectionState, IndexSnapshot, Mutation, MutationResult, OpenOptions, PersistedIndex, StoredRecord } from './types.js';
-import { canonical, collectionSchema, integer, prepareMetadata, validName } from './validation.js';
+import type { CollectionSchema, CollectionState, IndexSnapshot, Mutation, MutationResult, OpenOptions, PersistedIndex, StoredRecord, TransformersConfig } from './types.js';
+import { canonical, collectionSchema, embeddingFingerprint, integer, prepareMetadata, validName } from './validation.js';
 
 const VERSION = 2;
 const SYSTEM = 'system';
@@ -46,6 +46,16 @@ function errorName(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'name' in error ? String(error.name) : undefined;
 }
 
+function validEmbedding(config: TransformersConfig): boolean {
+  return !!config && config.provider === 'transformers' && typeof config.model === 'string' && !!config.model.trim()
+    && typeof config.revision === 'string' && !!config.revision.trim() && typeof config.dtype === 'string' && !!config.dtype.trim()
+    && ['auto', 'wasm', 'webgpu'].includes(config.device) && ['mean', 'cls', 'last_token'].includes(config.pooling)
+    && typeof config.normalize === 'boolean' && typeof config.queryPrefix === 'string' && typeof config.documentPrefix === 'string'
+    && Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0 && Number.isSafeInteger(config.batchSize) && config.batchSize > 0
+    && Number.isSafeInteger(config.batchTokens) && config.batchTokens >= config.maxTokens && typeof config.allowRemoteModels === 'boolean'
+    && (config.localModelPath === undefined || typeof config.localModelPath === 'string') && (config.wasmPath === undefined || typeof config.wasmPath === 'string');
+}
+
 function stateFrom(value: unknown, name?: string): CollectionState {
   if (value === undefined && name !== undefined) throw new SereneDBError(`Collection ${JSON.stringify(name)} does not exist.`, 'COLLECTION_NOT_FOUND');
   const state = value as CollectionState | undefined;
@@ -60,9 +70,12 @@ function stateFrom(value: unknown, name?: string): CollectionState {
     || !Number.isInteger(state.schema.index.efConstruction) || state.schema.index.efConstruction < state.schema.index.m || state.schema.index.efConstruction > 4096
     || !Number.isInteger(state.schema.index.efSearch) || state.schema.index.efSearch < 1 || state.schema.index.efSearch > 65536
     || !Number.isInteger(state.schema.index.annThreshold) || state.schema.index.annThreshold < 0 || state.schema.index.annThreshold > 10000000
-    || (state.schema.embedding !== null && (!state.schema.embedding || typeof state.schema.embedding.fingerprint !== 'string' || !state.schema.embedding.fingerprint || !state.schema.embedding.config || typeof state.schema.embedding.config !== 'object'))) {
+    || (state.schema.embedding !== null && (!state.schema.embedding || typeof state.schema.embedding.fingerprint !== 'string' || !state.schema.embedding.fingerprint || !validEmbedding(state.schema.embedding.config)))) {
     throw new SereneDBError('Persisted collection state is invalid; no cached or emergency data will be substituted.', 'STORAGE_CORRUPT');
   }
+  try {
+    if (state.schema.embedding && state.schema.embedding.fingerprint !== embeddingFingerprint(state.schema.embedding.config)) throw new Error('Embedding fingerprint mismatch');
+  } catch (error) { throw new SereneDBError('Persisted embedding schema is invalid.', 'STORAGE_CORRUPT', { cause: error }); }
   return state;
 }
 
@@ -77,6 +90,12 @@ function recordFrom(value: unknown, state: CollectionState, id?: string): Stored
     || (Object.getPrototypeOf(record.metadata) !== Object.prototype && Object.getPrototypeOf(record.metadata) !== null)) {
     throw new SereneDBError('Persisted vector record does not match its collection schema.', 'STORAGE_CORRUPT');
   }
+  let nonzero = false;
+  for (const value of record.vector) {
+    if (!Number.isFinite(value)) throw new SereneDBError('Persisted vector contains a nonfinite float32 value.', 'STORAGE_CORRUPT');
+    nonzero ||= value !== 0;
+  }
+  if (state.schema.metric === 'cosine' && !nonzero) throw new SereneDBError('Persisted cosine vector has zero norm.', 'STORAGE_CORRUPT');
   return record;
 }
 
@@ -283,7 +302,7 @@ export class Storage {
     const signal = options.signal;
     const fields = options.explicit === undefined ? undefined : { ...options.explicit };
     checkAbort(signal);
-    if (!schema || !['cosine', 'dot', 'euclidean'].includes(schema.metric) || schema.dimension === undefined || !schema.index || (schema.embedding !== null && (!schema.embedding || !schema.embedding.config))) invalid('A complete collection schema is required.');
+    if (!schema || !['cosine', 'dot', 'euclidean'].includes(schema.metric) || schema.dimension === undefined || !schema.index || (schema.embedding !== null && (!schema.embedding || !validEmbedding(schema.embedding.config)))) invalid('A complete, valid collection schema is required.');
     const normalized = collectionSchema({ dimension: schema.dimension ?? undefined, metric: schema.metric, index: schema.index, embedder: schema.embedding?.config });
     if (schema.embedding && schema.embedding.fingerprint !== normalized.embedding?.fingerprint) invalid('Embedding fingerprint does not match its configuration.', 'SCHEMA_MISMATCH');
     const explicit = (key: 'dimension' | 'metric' | 'embedding' | 'index') => fields === undefined || fields[key] === true;
@@ -345,12 +364,13 @@ export class Storage {
     }, signal);
   }
 
-  async get(name: string, id: string, signal?: AbortSignal): Promise<StoredRecord | undefined> {
+  async get(name: string, id: string, signal?: AbortSignal, expectedGeneration?: string): Promise<StoredRecord | undefined> {
     validName(name, 'Collection name');
     validName(id, 'Record ID');
     return this.transaction<StoredRecord | undefined>([COLLECTIONS, RECORDS], 'readonly', context => {
       context.watch(context.store(COLLECTIONS).get(name), value => {
         const state = stateFrom(value, name);
+        this.checkCollectionGeneration(state, expectedGeneration);
         context.watch(context.store(RECORDS).get([name, id]), record => context.done(recordFrom(record, state, id)));
       });
     }, signal);

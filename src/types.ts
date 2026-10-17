@@ -147,6 +147,7 @@ export interface OpenOptions {
   durability?: 'strict' | 'relaxed';
   blockedTimeoutMs?: number;
   wasm?: boolean;
+  maxResidentCollections?: number;
 }
 
 export interface IndexMatch {
