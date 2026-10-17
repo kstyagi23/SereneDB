@@ -6,6 +6,13 @@ export type * from './types.js';
 export { SereneDBError } from './errors.js';
 export { chunkDocument } from './chunking.js';
 
+function ownDocument(item: DocumentInput): DocumentInput {
+  if (!item || typeof item !== 'object') return structuredClone(item);
+  const { vector, ...rest } = item;
+  const owned = vector instanceof Float32Array || vector instanceof Float64Array ? vector.slice() : structuredClone(vector);
+  return { ...structuredClone(rest), ...(vector === undefined ? {} : { vector: owned }) };
+}
+
 export class Collection {
   constructor(private connection: Connection, public readonly name: string, public readonly generation: string) {}
   private call<T>(method: string, args: unknown[] = [], options: OperationOptions = {}): Promise<T> { return this.connection.call<T>(method, [this.name, this.generation, ...args], options); }
@@ -19,13 +26,14 @@ export class Collection {
         bytes += (item?.text?.length ?? 0) * 2 + (item?.vector?.length ?? 0) * 4;
         if (bytes > 64 * 1024 * 1024) throw new SereneDBError('Atomic batch exceeds 64 MiB. Use ingest() for streaming.', 'BATCH_TOO_LARGE');
       }
-      return this.call('upsert', [structuredClone(inputs)], options);
+      return this.call('upsert', [inputs.map(ownDocument)], options);
     } catch (error) { return Promise.reject(error); }
   }
   search(options: SearchOptions, operation: OperationOptions = {}): Promise<SearchResponse> {
     try {
-      const { signal, ...query } = options;
-      return this.call('search', [structuredClone(query)], { ...operation, signal: signal ?? operation.signal });
+      const { signal, vector, ...query } = options;
+      const owned = { ...structuredClone(query), ...(vector === undefined ? {} : { vector: vector instanceof Float32Array || vector instanceof Float64Array ? vector.slice() : structuredClone(vector) }) };
+      return this.call('search', [owned], { ...operation, signal: signal ?? operation.signal });
     } catch (error) { return Promise.reject(error); }
   }
   get(id: string, options: OperationOptions = {}): Promise<StoredRecord | null> { return this.call('get', [id], options); }
@@ -41,7 +49,7 @@ export class Collection {
     let offset = 0;
     while (true) {
       const records = await this.scan({ offset, limit: size, includeVectors: true, filter: options.filter }, { signal: options.signal });
-      for (const record of records) yield record as StoredRecord;
+      for (const record of records) { checkAbort(options.signal); yield record as StoredRecord; }
       if (records.length < size) return;
       offset += size;
     }
@@ -53,7 +61,7 @@ export class Collection {
     let batch: DocumentInput[] = [], upserted = 0;
     for await (const item of source) {
       if (options.signal?.aborted) throw new DOMException('Ingestion aborted; earlier batches remain committed.', 'AbortError');
-      batch.push(item);
+      batch.push(ownDocument(item));
       if (batch.length === batchSize) { upserted += (await this.upsert(batch, options)).upserted; batch = []; }
     }
     if (batch.length) upserted += (await this.upsert(batch, options)).upserted;
@@ -81,8 +89,16 @@ export class SereneDB {
   listCollections(): Promise<CollectionState[]> { return this.connection.call('list'); }
   export(options: OperationOptions = {}): Promise<DatabaseExport> { return this.connection.call('export', [], options); }
   import(data: DatabaseExport, options: OperationOptions & { replace?: boolean } = {}): Promise<{ collections: number }> { return this.connection.call('import', [structuredClone(data), options.replace ?? false], options); }
-  async close(): Promise<void> { try { await this.connection.call('close'); } finally { this.connection.terminate(); } }
-  async destroy(options: OperationOptions = {}): Promise<void> { try { await this.connection.call('destroy', [], options); } finally { this.connection.terminate(); } }
+  async close(): Promise<void> { await this.connection.call('close'); this.connection.terminate(); }
+  async destroy(options: OperationOptions = {}): Promise<void> {
+    checkAbort(options.signal);
+    try { await this.connection.call('destroy', [], options); this.connection.terminate(); }
+    catch (error) {
+      // Precommit abort leaves the connection usable; terminal reset errors report their state.
+      if (error instanceof SereneDBError && ['STORAGE_BLOCKED', 'DATABASE_CLOSED', 'WORKER_TIMEOUT', 'WORKER_FAILED'].includes(error.code)) this.connection.terminate();
+      throw error;
+    }
+  }
   static async storageInfo(): Promise<{ usage?: number; quota?: number; persistent: boolean }> {
     if (typeof navigator === 'undefined' || !navigator.storage) return { persistent: false };
     return { ...await navigator.storage.estimate(), persistent: await navigator.storage.persisted() };

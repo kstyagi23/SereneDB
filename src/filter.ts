@@ -4,6 +4,7 @@ import type { Filter, StoredRecord } from './types.js';
 function equal(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === undefined || b === undefined) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((value, i) => equal(value, b[i]));
   if (a && b && typeof a === 'object' && typeof b === 'object') {
     const left = Object.keys(a), right = Object.keys(b);
@@ -13,7 +14,7 @@ function equal(a: unknown, b: unknown): boolean {
 }
 
 export function compileFilter(filter?: Filter): (record: StoredRecord) => boolean {
-  if (!filter) return () => true;
+  if (filter === undefined) return () => true;
   let nodes = 0;
   const compile = (input: unknown, depth: number): ((record: StoredRecord) => boolean) => {
     if (++nodes > 256 || depth > 16 || !input || typeof input !== 'object' || Array.isArray(input)) invalid('Invalid filter or filter complexity limit exceeded.');

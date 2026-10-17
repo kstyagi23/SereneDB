@@ -72,7 +72,7 @@ export function collectionSchema(options: CollectionOptions = {}): CollectionSch
   if (!['cosine', 'dot', 'euclidean'].includes(metric)) invalid('Metric must be cosine, dot, or euclidean.');
   if (options.dimension !== undefined) integer(options.dimension, 'Dimension', 1, 16384);
   const input = typeof options.index === 'string' ? { type: options.index } : options.index ?? {};
-  const index: IndexConfig = { type: 'hnsw', m: 16, efConstruction: 128, efSearch: 64, annThreshold: 256, ...input };
+  const index: IndexConfig = { type: 'hnsw', m: 16, efConstruction: 128, efSearch: 128, annThreshold: 256, ...input };
   if (index.type !== 'hnsw' && index.type !== 'flat') invalid('Index type must be hnsw or flat.');
   integer(index.m, 'HNSW m', 2, 64);
   integer(index.efConstruction, 'efConstruction', index.m, 4096);

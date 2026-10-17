@@ -17,6 +17,7 @@ http.createServer(async (request, response) => {
       'Cache-Control': 'no-cache',
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'credentialless',
+      'X-Content-Type-Options': 'nosniff',
     });
     response.end(data);
   } catch { response.writeHead(404); response.end('Not found'); }

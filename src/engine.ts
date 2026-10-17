@@ -2,10 +2,12 @@ import { checkAbort, invalid, SereneDBError } from './errors.js';
 import { compileFilter } from './filter.js';
 import { LexicalIndex } from './lexical.js';
 import { SIMDScanner } from './distance.js';
+import { loadNativeKernel } from './distance-index.js';
+import type { NativeKernelFactory } from './distance-index.js';
 import { Storage } from './storage.js';
 import { VectorIndex } from './vector-index.js';
 import { TransformersEmbedding, transformersEmbedder } from './transformers.js';
-import { collectionSchema, integer, prepareMetadata, prepareVector, validName } from './validation.js';
+import { canonical, collectionSchema, integer, prepareMetadata, prepareVector, validName } from './validation.js';
 import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, IndexMatch, OpenOptions, OperationOptions, PreparedRecord, SearchOptions, SearchResponse, SearchResult, StoredRecord } from './types.js';
 
 type Header = Omit<StoredRecord, 'vector'>;
@@ -14,6 +16,7 @@ interface WorkingSet {
   records: Map<string, Header>;
   index: VectorIndex | null;
   lexical: LexicalIndex;
+  graphReady: boolean;
 }
 
 const yieldTask = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -24,35 +27,56 @@ export class Engine {
   private queue: Promise<unknown> = Promise.resolve();
   private pending = 0;
   private closed = false;
-  private constructor(private storage: Storage, private scanner: SIMDScanner | null, private readonly maxResidentCollections: number) {}
+  private terminal: Promise<unknown> | null = null;
+  private terminalMethod: string | null = null;
+  private constructor(private storage: Storage, private scanner: SIMDScanner | null, private readonly maxResidentCollections: number, private nativeFactory: NativeKernelFactory | null, private readonly maxResidentModels: number) {}
+
+  private evict(name: string): void {
+    try { this.entries.get(name)?.index?.dispose(); } catch { /* Derived resource cleanup is never a commit failure. */ }
+    this.entries.delete(name);
+  }
+
+  private clearScanner(): void { try { this.scanner?.clear(); } catch { this.scanner = null; } }
 
   static async open(name: string, options: OpenOptions = {}): Promise<Engine> {
     integer(options.maxResidentCollections ?? 2, 'maxResidentCollections', 1, 64);
+    integer(options.maxResidentModels ?? 1, 'maxResidentModels', 1, 16);
     const storage = await Storage.open(name, options);
-    const scanner = options.wasm === false ? null : await SIMDScanner.create();
-    return new Engine(storage, scanner, options.maxResidentCollections ?? 2);
+    const nativeFactory = options.wasm === false ? null : await loadNativeKernel();
+    const scanner = options.wasm === false || nativeFactory ? null : await SIMDScanner.create();
+    return new Engine(storage, scanner, options.maxResidentCollections ?? 2, nativeFactory, options.maxResidentModels ?? 1);
   }
 
   call(method: string, args: unknown[] = [], options: OperationOptions = {}): Promise<unknown> {
-    if (this.pending >= 128) return Promise.reject(new SereneDBError('Database queue is full. Await operations before enqueueing more.', 'BACKPRESSURE'));
+    const terminal = method === 'close' || method === 'destroy';
+    if (this.terminal) return terminal && method === this.terminalMethod ? this.terminal : Promise.reject(new SereneDBError('Database is closing; no different terminal operation or new work is accepted.', 'CLOSED'));
+    if (this.pending >= 128 && !terminal) return Promise.reject(new SereneDBError('Database queue is full. Await operations before enqueueing more.', 'BACKPRESSURE'));
+    try { checkAbort(options.signal); } catch (error) { return Promise.reject(error); }
     this.pending++;
+    const ownedOptions = { ...options };
     const task = this.queue.then(async () => {
-      checkAbort(options.signal);
+      checkAbort(ownedOptions.signal);
       if (this.closed && method !== 'close') throw new SereneDBError('Database is closed.', 'CLOSED');
-      const progress = options.onProgress;
-      const safe = { ...options, onProgress: progress ? (event: Parameters<NonNullable<OperationOptions['onProgress']>>[0]) => { try { progress(event); } catch { /* Observer failures cannot invalidate a commit. */ } } : undefined };
+      const progress = ownedOptions.onProgress;
+      const safe = { ...ownedOptions, onProgress: progress ? (event: Parameters<NonNullable<OperationOptions['onProgress']>>[0]) => { try { progress(event); } catch { /* Observer failures cannot invalidate a commit. */ } } : undefined };
       return this.dispatch(method, args, safe);
     });
     this.queue = task.catch(() => {});
-    return task.finally(() => { this.pending--; });
+    const result = task.finally(() => { this.pending--; });
+    if (terminal) {
+      this.terminal = result;
+      this.terminalMethod = method;
+      void result.catch(() => { if (!this.closed) { this.terminal = null; this.terminalMethod = null; } });
+    }
+    return result;
   }
 
-  private async working(name: string, generation?: string, options: OperationOptions = {}): Promise<WorkingSet> {
+  private async working(name: string, generation?: string, options: OperationOptions = {}, graph = true): Promise<WorkingSet> {
     validName(name, 'Collection name');
     const state = await this.storage.refreshState(name, options.signal);
     if (generation && state.generation !== generation) throw new SereneDBError('Collection was dropped or replaced. Open a new collection handle.', 'STALE_HANDLE');
     const cached = this.entries.get(name);
-    if (cached && cached.state.generation === state.generation && cached.state.revision === state.revision) { this.entries.delete(name); this.entries.set(name, cached); return cached; }
+    if (cached && cached.state.generation === state.generation && cached.state.revision === state.revision && (!graph || cached.graphReady)) { this.entries.delete(name); this.entries.set(name, cached); return cached; }
     if (cached && cached.state.generation !== state.generation) { await this.models.get(cached.state.generation)?.dispose(); this.models.delete(cached.state.generation); }
     checkAbort(options.signal);
     const snapshot = await this.storage.readCollection(name, options.signal);
@@ -64,51 +88,53 @@ export class Engine {
       records.set(record.id, header);
       lexical.add(record);
     }
-    if (this.scanner) this.scanner.clear();
+    this.clearScanner();
     let index: VectorIndex | null = null;
+    let graphReady = graph || snapshot.state.schema.index.type === 'flat';
     if (snapshot.state.schema.dimension !== null) {
       if (snapshot.snapshot?.generation === snapshot.state.generation && snapshot.snapshot.revision === snapshot.state.revision) {
         try {
-          index = VectorIndex.fromSnapshot(snapshot.snapshot.payload);
-          if (index.size !== records.size || index.dimension !== snapshot.state.schema.dimension || snapshot.snapshot.payload.metric !== snapshot.state.schema.metric || snapshot.records.some(record => {
+          index = VectorIndex.fromSnapshot(snapshot.snapshot.payload, this.nativeFactory ?? undefined);
+          if (index.size !== records.size || index.dimension !== snapshot.state.schema.dimension || snapshot.snapshot.payload.metric !== snapshot.state.schema.metric || canonical(snapshot.snapshot.payload.options) !== canonical(snapshot.state.schema.index) || snapshot.records.some(record => {
             const indexed = index!.get(record.id);
             return !indexed || indexed.some((value, i) => value !== record.vector[i]);
-          })) index = null;
-        } catch { index = null; }
+          })) { index.dispose(); index = null; }
+          if (index) graphReady = true;
+        } catch { index?.dispose(); index = null; }
       }
       if (!index) {
-        index = new VectorIndex(snapshot.state.schema.dimension, snapshot.state.schema.metric, snapshot.state.schema.index);
-        let lastYield = performance.now();
-        for (let i = 0; i < snapshot.records.length; i++) {
-          checkAbort(options.signal);
-          const record = snapshot.records[i];
-          index.add(record.id, record.vector);
-          if (performance.now() - lastYield > 8) {
-            options.onProgress?.({ phase: 'indexing', completed: i + 1, total: snapshot.records.length });
-            await yieldTask(); lastYield = performance.now();
-          }
-        }
+        index = new VectorIndex(snapshot.state.schema.dimension, snapshot.state.schema.metric, graphReady ? snapshot.state.schema.index : { ...snapshot.state.schema.index, type: 'flat' }, this.nativeFactory ?? undefined);
+        options.onProgress?.({ phase: 'indexing', completed: 0, total: snapshot.records.length });
+        try { await index.rebuild(snapshot.records, { signal: options.signal }); }
+        catch (error) { index.dispose(); throw error; }
+        options.onProgress?.({ phase: 'indexing', completed: snapshot.records.length, total: snapshot.records.length });
       }
     }
-    checkAbort(options.signal);
-    const entry = { state: snapshot.state, records, index, lexical };
-    this.entries.delete(name);
+    try { checkAbort(options.signal); } catch (error) { index?.dispose(); throw error; }
+    const entry = { state: snapshot.state, records, index, lexical, graphReady };
+    this.evict(name);
     this.entries.set(name, entry);
     while (this.entries.size > this.maxResidentCollections) {
       const [oldName, old] = this.entries.entries().next().value!;
-      if (old.index) { try { await this.storage.checkpoint(oldName, old.state.generation, old.state.revision, old.index.exportSnapshot()); } catch { /* Eviction must not depend on a derived checkpoint. */ } }
-      this.entries.delete(oldName);
+      if (old.index && old.graphReady) { try { await this.storage.checkpoint(oldName, old.state.generation, old.state.revision, old.index.exportSnapshot()); } catch { /* Eviction must not depend on a derived checkpoint. */ } }
+      this.evict(oldName);
     }
-    this.scanner?.clear();
+    this.clearScanner();
     return entry;
   }
 
-  private model(entry: WorkingSet): TransformersEmbedding {
+  private async model(entry: WorkingSet): Promise<TransformersEmbedding> {
     const schema = entry.state.schema.embedding;
     if (!schema) invalid('This collection has no embedder. Provide vectors or create a collection with transformersEmbedder().', 'NO_EMBEDDER');
     const key = entry.state.generation;
     let model = this.models.get(key);
+    while (!model && this.models.size >= this.maxResidentModels) {
+      const [oldKey, old] = this.models.entries().next().value!;
+      this.models.delete(oldKey);
+      try { await old.dispose(); } catch { /* A failed old cleanup must not corrupt collection state. */ }
+    }
     if (!model) { model = new TransformersEmbedding(schema.config); this.models.set(key, model); }
+    this.models.delete(key); this.models.set(key, model);
     return model;
   }
 
@@ -140,14 +166,14 @@ export class Engine {
         raw.push({ id: item.id, vector, metadata, ...(item.text !== undefined ? { text: item.text } : {}) });
       } else {
         if (typeof item.text !== 'string' || !item.text.trim()) invalid('Each document requires a vector or nonempty text.');
-        this.model(entry);
+        if (!entry.state.schema.embedding) invalid('Text documents require a configured embedder.', 'NO_EMBEDDER');
         positions.push(raw.length); texts.push(item.text);
         raw.push({ id: item.id, vector: new Float32Array(0), text: item.text, metadata });
       }
     }
     checkAbort(options.signal);
     if (texts.length) {
-      const vectors = await this.model(entry).encodeDocuments(texts, options);
+      const vectors = await (await this.model(entry)).encodeDocuments(texts, options);
       if (vectors.length !== texts.length) throw new SereneDBError('Embedding output count does not match input documents.', 'INVALID_EMBEDDING');
       for (let i = 0; i < vectors.length; i++) {
         const vector = prepareVector(vectors[i], entry.state.schema.metric, dimension);
@@ -164,15 +190,15 @@ export class Engine {
     if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
     const resident = this.entries.get(name);
     const cached = resident?.state.generation === generation && resident.state.revision === state.revision ? resident : undefined;
-    const entry = cached ?? { state, records: new Map<string, Header>(), index: null, lexical: new LexicalIndex() };
-    if (cached?.index?.stats().needsRebuild) { await cached.index.compact({ signal: options.signal }); this.scanner?.clear(); }
+    const entry = cached ?? { state, records: new Map<string, Header>(), index: null, lexical: new LexicalIndex(), graphReady: false };
+    if (cached?.index?.stats().needsRebuild) { await cached.index.compact({ signal: options.signal }); this.clearScanner(); }
     const records = await this.prepare(entry, inputs, options);
     const result = await this.storage.mutate(name, { upserts: records }, generation, options.signal);
-    this.scanner?.clear();
+    this.clearScanner();
     // Storage has committed. Cancellation or a failed derived index cannot undo that acknowledgement.
-    if (cached && result.state.revision === entry.state.revision + 1 && result.state.count >= entry.records.size) {
+    if (cached && result.upserted.length > 0 && result.state.revision === entry.state.revision + 1 && result.state.count >= entry.records.size) {
       try {
-        entry.index ??= result.state.schema.dimension === null ? null : new VectorIndex(result.state.schema.dimension, result.state.schema.metric, result.state.schema.index);
+        entry.index ??= result.state.schema.dimension === null ? null : new VectorIndex(result.state.schema.dimension, result.state.schema.metric, entry.graphReady ? result.state.schema.index : { ...result.state.schema.index, type: 'flat' }, this.nativeFactory ?? undefined);
         let lastYield = performance.now();
         for (const record of result.upserted) {
           entry.index!.add(record.id, record.vector);
@@ -181,8 +207,8 @@ export class Engine {
           if (performance.now() - lastYield > 8) { await yieldTask(); lastYield = performance.now(); }
         }
         entry.state = result.state;
-      } catch { this.entries.delete(name); }
-    } else if (!cached || result.state.revision !== entry.state.revision) this.entries.delete(name);
+      } catch { this.evict(name); }
+    } else if (!cached || result.state.revision !== entry.state.revision) this.evict(name);
     return { count: result.state.count, upserted: result.upserted.length, revision: result.state.revision, generation: result.state.generation };
   }
 
@@ -199,7 +225,11 @@ export class Engine {
     if (input.mmr !== undefined && (!Number.isFinite(input.mmr) || input.mmr < 0 || input.mmr > 1)) invalid('mmr must be between zero and one.');
     if (input.vector !== undefined && input.text !== undefined) invalid('Pass either text or a query vector, not both.');
     if (input.vector === undefined && (typeof input.text !== 'string' || !input.text.trim())) invalid('Search requires a vector or nonempty text.');
-    const entry = await this.working(name, generation, options);
+    const state = await this.storage.refreshState(name, options.signal);
+    if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
+    const denseExact = requested === 'auto' && (state.schema.dimension ?? 0) >= 256 && state.count <= 20000;
+    const exact = requested === 'exact' || denseExact || state.schema.index.type === 'flat' || Boolean(input.filter) || state.count < state.schema.index.annThreshold;
+    const entry = await this.working(name, generation, options, !exact);
     if (input.maxDistance !== undefined && entry.state.schema.metric !== 'euclidean') invalid('maxDistance is only valid for Euclidean collections.');
     const predicate = compileFilter(input.filter);
     const filter = (id: string) => predicate(entry.records.get(id)! as StoredRecord);
@@ -207,22 +237,28 @@ export class Engine {
     if (input.vector !== undefined) {
       if (entry.state.schema.embedding && input.space !== entry.state.schema.embedding.fingerprint) invalid('Query vector embedding-space fingerprint does not match.', 'SCHEMA_MISMATCH');
       query = prepareVector(input.vector, entry.state.schema.metric, entry.state.schema.dimension);
-    } else if (entry.state.schema.embedding) query = prepareVector(await this.model(entry).encodeQuery(input.text!, options), entry.state.schema.metric, entry.state.schema.dimension);
+    } else if (entry.state.schema.embedding) query = prepareVector(await (await this.model(entry)).encodeQuery(input.text!, options), entry.state.schema.metric, entry.state.schema.dimension);
     else if (requested !== 'hybrid') invalid('Text search requires a configured embedder. Use hybrid mode for lexical-only search.', 'NO_EMBEDDER');
+    if (!query && (input.minScore !== undefined || input.maxDistance !== undefined)) invalid('Vector score/distance cutoffs require a query vector or embedder, not lexical-only retrieval.');
     checkAbort(options.signal);
-    const exact = requested === 'exact' || entry.state.schema.index.type === 'flat' || Boolean(input.filter) || entry.records.size < entry.state.schema.index.annThreshold;
     let mode: SearchResponse['mode'] = requested === 'hybrid' ? 'hybrid' : exact ? 'exact' : 'ann';
     const candidates = input.mmr !== undefined || mode === 'hybrid' ? Math.min(10000, Math.max(topK * 4, 32)) : topK;
     let matches: IndexMatch[] = [];
     if (query && entry.index && topK > 0) {
       let scores: Float32Array | undefined;
-      if (exact && this.scanner && entry.records.size >= 256) {
+      if (exact && this.nativeFactory && entry.records.size >= 256) {
+        try {
+          const calculated = await entry.index.precomputeDistances(query, options.signal);
+          if (calculated?.every(Number.isFinite)) scores = calculated;
+        } catch { checkAbort(options.signal); }
+      }
+      if (exact && !scores && this.scanner && entry.records.size >= 256) {
         try {
           const packed = entry.index.getPackedVectors();
           this.scanner.load(entry.index, packed.vectors, packed.count, entry.index.dimension);
           const calculated = await this.scanner.score(query, entry.state.schema.metric, options.signal);
           if (calculated.every(Number.isFinite)) scores = calculated;
-        } catch (error) { checkAbort(options.signal); this.scanner.clear(); }
+        } catch (error) { checkAbort(options.signal); this.clearScanner(); }
       }
       matches = await entry.index.search(query, { topK: candidates, exact, efSearch: input.efSearch, filter: input.filter ? filter : undefined, minScore: input.minScore, maxDistance: input.maxDistance, signal: options.signal, scores });
     }
@@ -231,7 +267,7 @@ export class Engine {
       const fused = new Map<string, number>();
       for (const ranking of [matches, lexical]) for (let i = 0; i < ranking.length; i++) fused.set(ranking[i].id, (fused.get(ranking[i].id) ?? 0) + 1 / (60 + i + 1));
       if (query && (input.minScore !== undefined || input.maxDistance !== undefined)) {
-        const allowed = new Set((await entry.index!.search(query, { topK: entry.records.size, exact: true, filter, minScore: input.minScore, maxDistance: input.maxDistance, signal: options.signal })).map(match => match.id));
+        const allowed = new Set(entry.index ? (await entry.index.search(query, { topK: entry.records.size, exact: true, filter, minScore: input.minScore, maxDistance: input.maxDistance, signal: options.signal })).map(match => match.id) : []);
         for (const id of fused.keys()) if (!allowed.has(id)) fused.delete(id);
       }
       matches = Array.from(fused, ([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
@@ -247,7 +283,10 @@ export class Engine {
   }
 
   private async diversify(entry: WorkingSet, matches: IndexMatch[], topK: number, lambda: number, signal?: AbortSignal): Promise<IndexMatch[]> {
-    const vectors = matches.map(match => prepareVector(entry.index!.get(match.id)!, 'cosine'));
+    const vectors = matches.map(match => {
+      const vector = entry.index!.get(match.id)!;
+      return vector.some(value => value !== 0) ? prepareVector(vector, 'cosine') : vector;
+    });
     const penalties = new Float64Array(matches.length).fill(-1);
     const chosen = new Set<number>(), results: IndexMatch[] = [];
     const maximum = Math.max(...matches.map(match => match.score)), minimum = Math.min(...matches.map(match => match.score));
@@ -292,7 +331,7 @@ export class Engine {
         const input = (args[2] ?? {}) as { offset?: number; limit?: number; includeVectors?: boolean; filter?: SearchOptions['filter'] };
         const offset = input.offset ?? 0, limit = input.limit ?? 100;
         integer(offset, 'offset', 0, Number.MAX_SAFE_INTEGER); integer(limit, 'limit', 0, 100000);
-        const entry = await this.working(name, generation, options), filter = compileFilter(input.filter);
+        const entry = await this.working(name, generation, options, false), filter = compileFilter(input.filter);
         const ids: string[] = [];
         let passed = 0;
         for (const [id, record] of entry.records) if (filter(record as StoredRecord)) { if (passed++ >= offset && ids.length < limit) ids.push(id); }
@@ -305,61 +344,66 @@ export class Engine {
         ids.forEach(id => validName(id, 'Document ID'));
         const cached = this.entries.get(name);
         const result = await this.storage.mutate(name, method === 'clear' ? { clear: true } : { deleteIds: ids }, generation, options.signal);
-        this.scanner?.clear();
-        if (method === 'delete' && cached?.state.generation === generation && result.state.revision === cached.state.revision + 1) {
-          for (const id of ids) { cached.records.delete(id); cached.index?.remove(id); cached.lexical.remove(id); }
-          cached.state = result.state;
-        } else if (method === 'clear' || cached?.state.revision !== result.state.revision) this.entries.delete(name);
+        this.clearScanner();
+        if (method === 'delete' && result.deleted > 0 && cached?.state.generation === generation && result.state.revision === cached.state.revision + 1) {
+          try {
+            for (const id of ids) { cached.records.delete(id); cached.index?.remove(id); cached.lexical.remove(id); }
+            cached.state = result.state;
+          } catch { this.evict(name); }
+        } else if (method === 'clear' || cached?.state.revision !== result.state.revision) this.evict(name);
         return { deleted: result.deleted, count: result.state.count, revision: result.state.revision };
       }
       case 'drop': {
         await this.storage.dropCollection(name, generation, options.signal);
-        this.entries.delete(name); this.scanner?.clear();
-        await this.models.get(generation)?.dispose(); this.models.delete(generation);
+        this.evict(name); this.clearScanner();
+        try { await this.models.get(generation)?.dispose(); } catch { /* The drop is already committed. */ } this.models.delete(generation);
         return;
       }
       case 'preload': {
-        const entry = await this.working(name, generation, options);
-        await this.model(entry).preload(options);
-        return this.model(entry).runtimeInfo();
+        const entry = await this.working(name, generation, options, false);
+        const model = await this.model(entry);
+        await model.preload(options);
+        return model.runtimeInfo();
       }
       case 'unload': {
         const state = await this.storage.refreshState(name, options.signal);
         if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
         const cached = this.entries.get(name);
-        if (cached?.index && cached.state.revision === state.revision) { try { await this.storage.checkpoint(name, generation, state.revision, cached.index.exportSnapshot()); } catch { /* Unload never requires a snapshot write. */ } }
-        this.entries.delete(name); this.scanner?.clear();
+        if (cached?.index && cached.graphReady && cached.state.revision === state.revision) { try { await this.storage.checkpoint(name, generation, state.revision, cached.index.exportSnapshot()); } catch { /* Unload never requires a snapshot write. */ } }
+        this.evict(name); this.clearScanner();
         await this.models.get(generation)?.dispose(); this.models.delete(generation);
         return;
       }
       case 'compact': {
         const entry = await this.working(name, generation, options);
-        if (entry.index) { await entry.index.compact({ signal: options.signal }); this.scanner?.clear(); }
+        if (entry.index) { await entry.index.compact({ signal: options.signal }); this.clearScanner(); }
         if (entry.index) await this.storage.checkpoint(name, generation, entry.state.revision, entry.index.exportSnapshot());
         return this.statistics(entry);
       }
-      case 'stats': return this.statistics(await this.working(name, generation, options));
+      case 'stats': return this.statistics(await this.working(name, generation, options, false));
       case 'checkpoint': {
         const entry = await this.working(name, generation, options);
         return entry.index ? this.storage.checkpoint(name, generation, entry.state.revision, entry.index.exportSnapshot()) : true;
       }
       case 'export': {
         const output: DatabaseExport = { format: 'serenedb', version: 2, collections: [] };
-        for (const state of await this.storage.listCollections()) {
-          const snapshot = await this.storage.readCollection(state.name);
+        for (const state of await this.storage.listCollections(options.signal)) {
+          checkAbort(options.signal);
+          const snapshot = await this.storage.readCollection(state.name, options.signal);
           output.collections.push({ state: snapshot.state, records: snapshot.records.map(record => ({ ...record, vector: Array.from(record.vector) })) });
         }
-        return output;
+        checkAbort(options.signal); return output;
       }
       case 'import': return this.importData(args[0] as DatabaseExport, Boolean(args[1]), options);
       case 'close': case 'destroy': {
         if (method === 'close') {
-          for (const entry of this.entries.values()) if (entry.index) { try { await this.storage.checkpoint(entry.state.name, entry.state.generation, entry.state.revision, entry.index.exportSnapshot()); } catch { /* Derived snapshots are optional. */ } }
+          for (const entry of this.entries.values()) if (entry.index && entry.graphReady) { try { await this.storage.checkpoint(entry.state.name, entry.state.generation, entry.state.revision, entry.index.exportSnapshot()); } catch { /* Derived snapshots are optional. */ } }
           this.storage.close();
         } else await this.storage.destroy(options.signal);
         this.closed = true;
-        this.entries.clear(); this.scanner?.clear();
-        for (const model of this.models.values()) await model.dispose();
+        for (const name of this.entries.keys()) this.evict(name);
+        this.clearScanner();
+        for (const model of this.models.values()) { try { await model.dispose(); } catch { /* Closed storage cannot be undone by resource cleanup. */ } }
         this.models.clear(); return;
       }
       default: invalid(`Unknown database operation ${method}.`);
@@ -367,7 +411,8 @@ export class Engine {
   }
 
   private statistics(entry: WorkingSet): unknown {
-    return { ...structuredClone(entry.state), vectorBytes: entry.records.size * (entry.state.schema.dimension ?? 0) * 4, index: entry.index?.stats() ?? null, kernel: this.scanner ? 'wasm-simd' : 'javascript', model: this.models.get(entry.state.generation)?.runtimeInfo() ?? null };
+    const stats = entry.index?.stats() ?? null;
+    return { ...structuredClone(entry.state), vectorBytes: entry.records.size * (entry.state.schema.dimension ?? 0) * 4, graphReady: entry.graphReady, index: stats, kernel: this.scanner || stats?.kernel === 'accelerated' ? 'wasm-simd' : 'javascript', model: this.models.get(entry.state.generation)?.runtimeInfo() ?? null };
   }
 
   private async importData(data: DatabaseExport, replace: boolean, options: OperationOptions): Promise<unknown> {
@@ -385,6 +430,7 @@ export class Engine {
       });
       const dimensions = new Set(records.map(record => record.vector.length));
       if (dimensions.size > 1) invalid('Imported collection contains mixed dimensions.');
+      validated.dimension ??= records[0]?.vector.length ?? null;
       if (schema.embedding && schema.embedding.fingerprint !== validated.embedding?.fingerprint) invalid('Import embedding-space fingerprint does not match its config.', 'SCHEMA_MISMATCH');
       return { name: collection.state.name, schema: validated, records };
     });
@@ -392,17 +438,17 @@ export class Engine {
     const existing = new Map((await this.storage.listCollections()).map(state => [state.name, state]));
     for (const collection of prepared) {
       const persisted = existing.get(collection.name);
-      if (persisted && (persisted.schema.metric !== collection.schema.metric || persisted.schema.dimension !== null && collection.schema.dimension !== null && persisted.schema.dimension !== collection.schema.dimension || (persisted.schema.embedding?.fingerprint ?? null) !== (collection.schema.embedding?.fingerprint ?? null))) invalid(`Import schema does not match existing collection ${collection.name}.`, 'SCHEMA_MISMATCH');
+      if (persisted && (persisted.schema.metric !== collection.schema.metric || persisted.schema.dimension !== null && collection.schema.dimension !== null && persisted.schema.dimension !== collection.schema.dimension || (persisted.schema.embedding?.fingerprint ?? null) !== (collection.schema.embedding?.fingerprint ?? null) || canonical(persisted.schema.index) !== canonical(collection.schema.index))) invalid(`Import schema does not match existing collection ${collection.name}.`, 'SCHEMA_MISMATCH');
     }
     let committed = 0;
     for (const collection of prepared) {
       checkAbort(options.signal);
-      const state = await this.storage.ensureCollection(collection.name, collection.schema);
+      const state = await this.storage.ensureCollection(collection.name, collection.schema, { explicit: { dimension: false, metric: true, embedding: true, index: true }, expectedGeneration: existing.get(collection.name)?.generation ?? null, signal: options.signal });
       await this.storage.mutate(collection.name, { upserts: collection.records, clear: replace }, state.generation, options.signal);
-      this.entries.delete(collection.name); committed++;
+      this.evict(collection.name); committed++;
       options.onProgress?.({ phase: 'importing', completed: committed, total: prepared.length });
     }
-    this.scanner?.clear();
+    this.clearScanner();
     return { collections: committed };
   }
 }

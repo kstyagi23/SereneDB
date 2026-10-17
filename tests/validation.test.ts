@@ -44,6 +44,9 @@ test('filters enforce boolean, membership, range, nested and missing semantics',
   assert.equal(compileFilter({ absent: null })(record), false);
   assert.throws(() => compileFilter({ category: { $wat: 1 } }));
   assert.throws(() => compileFilter({ '__proto__.x': 1 }));
+  for (const filter of [false, 0, '', null]) assert.throws(() => compileFilter(filter as never));
+  assert.equal(compileFilter({ tags: {} })(record), false);
+  assert.equal(compileFilter({ nested: [] })(record), false);
 });
 
 test('BM25 supports updates deletes and prefilters', () => {

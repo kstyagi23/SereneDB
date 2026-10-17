@@ -29,8 +29,8 @@ scope.onmessage = event => {
     };
     collect(result);
     scope.postMessage({ id, result }, Array.from(buffers));
-  }, error => {
+  }).catch(error => {
     const value: SerializedError = { name: error?.name ?? 'Error', message: error?.message ?? String(error), ...(error?.code ? { code: error.code } : {}) };
-    scope.postMessage({ id, error: value });
+    try { scope.postMessage({ id, error: value }); } catch { scope.close(); }
   }).finally(() => controllers.delete(id));
 };

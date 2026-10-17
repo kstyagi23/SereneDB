@@ -24,6 +24,18 @@ test('worker CRUD survives cold page reload and localStorage denial', async ({ p
   expect(result).toEqual({ count: 2, ids: ['a', 'b'], score: 1 });
 });
 
+test('missing SIMD assets fall back to JavaScript without changing results', async ({ page, context }) => {
+  await context.route('**/distance.wasm', route => route.abort());
+  const result = await page.evaluate(async () => {
+    const db = await window.SereneDB.open(`fallback-${crypto.randomUUID()}`), docs = await db.collection('docs');
+    await docs.upsert([{ id: 'a', vector: [1, 0] }, { id: 'b', vector: [0, 1] }]);
+    const response = await docs.search({ vector: [1, 0], mode: 'exact' });
+    const stats = await docs.stats() as { kernel: string }; await db.destroy();
+    return { ids: response.results.map(record => record.id), kernel: stats.kernel };
+  });
+  expect(result).toEqual({ ids: ['a', 'b'], kernel: 'javascript' });
+});
+
 test('two pages see committed writes and reject schema conflicts', async ({ page, context }) => {
   const name = `concurrent-${crypto.randomUUID()}`;
   const other = await context.newPage(); await other.goto('/test.html');
@@ -55,6 +67,21 @@ test('destroy waits for queued writes and invalidates open peers', async ({ page
     return { peerRejected, collections };
   });
   expect(result).toEqual({ peerRejected: true, collections: [] });
+});
+
+test('pre-aborted destroy preserves the worker and close drains a full queue', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const name = `queue-${crypto.randomUUID()}`;
+    const db = await window.SereneDB.open(name), docs = await db.collection('docs');
+    await docs.upsert({ id: 'a', vector: [1, 0] });
+    let abort = false; try { await db.destroy({ signal: AbortSignal.abort() }); } catch (error) { abort = error.name === 'AbortError'; }
+    const count = await docs.count();
+    const pending = Array.from({ length: 128 }, () => docs.state());
+    const closing = db.close(); await Promise.all(pending); await closing;
+    const reopened = await window.SereneDB.open(name); await reopened.destroy();
+    return { abort, count, drained: pending.length };
+  });
+  expect(result).toEqual({ abort: true, count: 1, drained: 128 });
 });
 
 test('aborted request and malformed batch leave durable state unchanged', async ({ page }) => {
@@ -166,7 +193,29 @@ test('worker loss recovers committed rows without an index checkpoint', async ({
   expect(result).toEqual(['committed']);
 });
 
+test('unresponsive workers reject bounded operations instead of hanging forever', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const url = URL.createObjectURL(new Blob(['onmessage = event => { if (event.data.method === "open") postMessage({id:event.data.id,result:null}); };'], { type: 'text/javascript' }));
+    const db = await window.SereneDB.open(`unresponsive-${crypto.randomUUID()}`, { workerUrl: url, operationTimeoutMs: 1000 });
+    const start = performance.now(); let code;
+    try { await db.listCollections(); } catch (error) { code = error.code; }
+    URL.revokeObjectURL(url);
+    return { code, elapsed: performance.now() - start };
+  });
+  expect(result.code).toBe('WORKER_TIMEOUT'); expect(result.elapsed).toBeLessThan(5000);
+});
+
 test('browser demo ingests and retrieves without external downloads', async ({ page }) => {
+  await page.getByRole('button', { name: 'Open & Ingest' }).click();
+  await expect(page.locator('#status')).toContainText('Committed');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+});
+
+test('browser demo remains usable without horizontal overflow on mobile widths', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.getByRole('button', { name: 'Open & Ingest' })).toBeVisible();
   await page.getByRole('button', { name: 'Open & Ingest' }).click();
   await expect(page.locator('#status')).toContainText('Committed');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
@@ -182,6 +231,9 @@ test('SIMD exact reference and HNSW recall stay correct off the UI thread', asyn
     let beats = 0;
     const timer = setInterval(() => beats++, 10);
     await docs.upsert(records);
+    const indexStart = performance.now();
+    await docs.checkpoint();
+    const buildMs = performance.now() - indexStart;
     let recall = 0;
     const times: number[] = [];
     for (let i = 0; i < 12; i++) {
@@ -194,7 +246,7 @@ test('SIMD exact reference and HNSW recall stay correct off the UI thread', asyn
     clearInterval(timer);
     const stats = await docs.stats() as { kernel: string };
     await db.destroy(); times.sort((a, b) => a - b);
-    return { recall: recall / 12, beats, kernel: stats.kernel, annP95: times[Math.floor(times.length * 0.95)] };
+    return { recall: recall / 12, beats, kernel: stats.kernel, buildMs: Math.round(buildMs), annP95: times[Math.floor(times.length * 0.95)] };
   });
   console.log(`Browser benchmark ${test.info().project.name}: ${JSON.stringify(result)}`);
   expect(result.recall).toBeGreaterThanOrEqual(0.95);

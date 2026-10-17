@@ -10,6 +10,7 @@ const MAX_ELEMENTS = 134_217_728;
 const MAX_LINKS = 16_777_216;
 const MAX_ID_CHARACTERS = 16_777_216;
 const TASK_BUDGET_MS = 8;
+const PAIR_CACHE_SIZE = 262144;
 
 function clock(): number {
   return globalThis.performance?.now() ?? Date.now();
@@ -40,7 +41,10 @@ class NodeHeap {
   get size(): number { return this.length; }
   get node(): number { return this.nodes[0]; }
   get distance(): number { return this.distances[0]; }
-  clear(): void { this.length = 0; }
+  clear(): void {
+    this.length = 0;
+    if (this.nodes.length > 65536) { this.nodes = []; this.distances = []; }
+  }
 
   private precedes(a: number, da: number, b: number, db: number): boolean {
     const order = compare(a, da, b, db, this.ids);
@@ -96,10 +100,21 @@ interface Work {
   quantum: number;
 }
 
+interface PairCache {
+  keys: Float64Array;
+  values: Float64Array;
+}
+
 interface CooperativeState {
   signal?: AbortSignal;
   version: number;
   deadline: number;
+  cancelled?: () => boolean;
+}
+
+interface ScoreState extends CooperativeState {
+  completion: Promise<void>;
+  controller: AbortController;
 }
 
 export interface VectorIndexStats {
@@ -110,7 +125,20 @@ export interface VectorIndexStats {
   tombstoneRatio: number;
   links: number;
   needsRebuild: boolean;
+  kernel: 'javascript' | 'accelerated';
+  vectorBytes: number;
+  allocatedVectorBytes: number;
 }
+
+export interface VectorDistanceKernel {
+  append(row: number, vector: Float32Array): void;
+  distance(query: Float32Array, row: number): number;
+  between(a: number, b: number): number;
+  score?(query: Float32Array, signal?: AbortSignal): Promise<Float32Array>;
+  dispose(): void;
+}
+
+export type VectorDistanceKernelFactory = (dimension: number, metric: Metric) => VectorDistanceKernel;
 
 export class VectorIndex {
   readonly metric: Metric;
@@ -131,8 +159,13 @@ export class VectorIndex {
   private idCharacters = 0;
   private version = 0;
   private workspaces: Workspace[] = [];
+  private pairCache?: PairCache;
+  private kernelFactory?: VectorDistanceKernelFactory;
+  private kernel?: VectorDistanceKernel;
+  private disposed = false;
+  private readonly pendingScores = new Set<ScoreState>();
 
-  constructor(dimension: number, metric: Metric, options: IndexConfig) {
+  constructor(dimension: number, metric: Metric, options: IndexConfig, kernelFactory?: VectorDistanceKernelFactory) {
     integer(dimension, 'Dimension', 1, 16384);
     if (metric !== 'cosine' && metric !== 'dot' && metric !== 'euclidean') invalid('Metric must be cosine, dot, or euclidean.');
     if (!options || (options.type !== 'hnsw' && options.type !== 'flat')) invalid('Index type must be hnsw or flat.');
@@ -140,16 +173,20 @@ export class VectorIndex {
     integer(options.efConstruction, 'efConstruction', options.m, 4096);
     integer(options.efSearch, 'efSearch', 1, 65536);
     integer(options.annThreshold, 'annThreshold', 0, 10000000);
+    if (kernelFactory !== undefined && typeof kernelFactory !== 'function') invalid('Distance kernel factory must be a function.');
     this.dimensionValue = dimension;
     this.metric = metric;
     this.options = Object.freeze({ ...options });
+    this.kernelFactory = kernelFactory;
+    this.kernel = this.createKernel();
   }
 
   get dimension(): number { return this.dimensionValue; }
   get size(): number { return this.lookup.size; }
   get physicalCount(): number { return this.count; }
   get tombstoneRatio(): number { return this.count ? (this.count - this.size) / this.count : 0; }
-  get stats(): VectorIndexStats {
+  stats(): VectorIndexStats {
+    this.assertUsable();
     const tombstones = this.count - this.size;
     return {
       size: this.size,
@@ -159,18 +196,23 @@ export class VectorIndex {
       tombstoneRatio: this.tombstoneRatio,
       links: this.linkCount,
       needsRebuild: tombstones > 0 && (this.size === 0 || (tombstones >= 64 && this.tombstoneRatio >= 0.2)),
+      kernel: this.kernel ? 'accelerated' : 'javascript',
+      vectorBytes: this.count * this.dimension * 4,
+      allocatedVectorBytes: this.rows.byteLength,
     };
   }
 
-  has(id: string): boolean { return this.lookup.has(id); }
+  has(id: string): boolean { this.assertUsable(); return this.lookup.has(id); }
 
   get(id: string): Float32Array | undefined {
+    this.assertUsable();
     const node = this.lookup.get(id);
     return node === undefined ? undefined : this.rows.slice(node * this.dimension, (node + 1) * this.dimension);
   }
 
   // Borrowed read-only views for bulk distance kernels; invalidated by mutations.
   getPackedVectors(): { vectors: Float32Array; active: Uint8Array; ids: string[]; count: number } {
+    this.assertUsable();
     return { vectors: this.rows.subarray(0, this.count * this.dimension), active: this.active.subarray(0, this.count), ids: this.ids, count: this.count };
   }
 
@@ -219,23 +261,61 @@ export class VectorIndex {
     return { steps: 0, quantum: Math.max(1, Math.min(256, Math.floor(131072 / this.dimension))) };
   }
 
+  private assertUsable(): void {
+    if (this.disposed) invalid('Vector index is disposed.', 'INDEX_DISPOSED');
+  }
+
+  private disposeKernel(kernel?: VectorDistanceKernel): void {
+    try { kernel?.dispose(); } catch { /* Accelerator cleanup must not invalidate an index mutation. */ }
+  }
+
+  private createKernel(): VectorDistanceKernel | undefined {
+    let kernel: VectorDistanceKernel | undefined;
+    try {
+      kernel = this.kernelFactory?.(this.dimension, this.metric);
+      if (kernel && (typeof kernel.append !== 'function' || typeof kernel.distance !== 'function' || typeof kernel.between !== 'function' || typeof kernel.dispose !== 'function')) throw new Error('Invalid distance kernel.');
+      return kernel;
+    } catch {
+      this.disposeKernel(kernel);
+      return undefined;
+    }
+  }
+
+  private disableKernel(): void {
+    const kernel = this.kernel;
+    this.kernel = undefined;
+    this.disposeKernel(kernel);
+    this.pairCache?.keys.fill(0);
+  }
+
+  private appendKernel(node: number): void {
+    try { this.kernel?.append(node, this.rows.subarray(node * this.dimension, (node + 1) * this.dimension)); }
+    catch { this.disableKernel(); }
+  }
+
   private assertVersion(version: number): void {
+    this.assertUsable();
     if (this.version !== version) invalid('Vector index changed during the operation; retry against the current revision.', 'INDEX_CHANGED');
   }
 
   private async cooperate<T>(iterator: Generator<void, T>, state: CooperativeState): Promise<T> {
-    for (;;) {
-      checkAbort(state.signal);
-      this.assertVersion(state.version);
-      const step = iterator.next();
-      checkAbort(state.signal);
-      this.assertVersion(state.version);
-      if (clock() >= state.deadline) {
-        await yieldTask(state.signal);
+    try {
+      for (;;) {
+        checkAbort(state.signal);
         this.assertVersion(state.version);
-        state.deadline = clock() + TASK_BUDGET_MS;
+        if (state.cancelled?.()) throw new DOMException('Operation aborted.', 'AbortError');
+        const step = iterator.next();
+        checkAbort(state.signal);
+        this.assertVersion(state.version);
+        if (clock() >= state.deadline) {
+          await yieldTask(state.signal);
+          this.assertVersion(state.version);
+          state.deadline = clock() + TASK_BUDGET_MS;
+        }
+        if (step.done) return step.value;
       }
-      if (step.done) return step.value;
+    } finally {
+      iterator.return(undefined as never);
     }
   }
 
@@ -247,6 +327,14 @@ export class VectorIndex {
   }
 
   private distance(query: Float32Array, node: number): number {
+    // Bulk kernels may yield while holding a shared query/output scratch buffer.
+    if (this.kernel && this.pendingScores.size === 0) {
+      try {
+        const distance = this.kernel.distance(query, node);
+        if (Number.isFinite(distance) && (this.metric !== 'euclidean' || distance >= 0)) return this.metric === 'cosine' ? Math.max(-1, Math.min(1, distance)) : distance;
+      } catch { /* Fall back to the owned float32 matrix if acceleration fails. */ }
+      this.disableKernel();
+    }
     const rows = this.rows;
     const offset = node * this.dimension;
     const end = this.dimension - (this.dimension % 4);
@@ -269,6 +357,23 @@ export class VectorIndex {
   }
 
   private between(a: number, b: number): number {
+    const cache = this.pairCache;
+    const lo = a < b ? a : b;
+    const hi = a < b ? b : a;
+    const key = lo * MAX_ROWS + hi + 1;
+    const slot = (Math.imul(lo, 0x9e3779b1) ^ Math.imul(hi, 0x85ebca6b)) & (PAIR_CACHE_SIZE - 1);
+    if (cache && cache.keys[slot] === key) return cache.values[slot];
+    if (this.kernel && this.pendingScores.size === 0) {
+      try {
+        let distance = this.kernel.between(a, b);
+        if (Number.isFinite(distance) && (this.metric !== 'euclidean' || distance >= 0)) {
+          if (this.metric === 'cosine') distance = Math.max(-1, Math.min(1, distance));
+          if (cache) { cache.keys[slot] = key; cache.values[slot] = distance; }
+          return distance;
+        }
+      } catch { /* Pairwise acceleration is optional, including during rebuild. */ }
+      this.disableKernel();
+    }
     const rows = this.rows;
     const oa = a * this.dimension;
     const ob = b * this.dimension;
@@ -284,11 +389,14 @@ export class VectorIndex {
         sum += x * x + y * y + z * z + w * w;
       }
       for (; i < this.dimension; i++) { const d = rows[oa + i] - rows[ob + i]; sum += d * d; }
+      if (cache) { cache.keys[slot] = key; cache.values[slot] = sum; }
       return sum;
     }
     for (; i < end; i += 4) sum += rows[oa + i] * rows[ob + i] + rows[oa + i + 1] * rows[ob + i + 1] + rows[oa + i + 2] * rows[ob + i + 2] + rows[oa + i + 3] * rows[ob + i + 3];
     for (; i < this.dimension; i++) sum += rows[oa + i] * rows[ob + i];
-    return this.metric === 'cosine' ? -Math.max(-1, Math.min(1, sum)) : -sum;
+    const distance = this.metric === 'cosine' ? -Math.max(-1, Math.min(1, sum)) : -sum;
+    if (cache) { cache.keys[slot] = key; cache.values[slot] = distance; }
+    return distance;
   }
 
   private randomLevel(): number {
@@ -340,8 +448,10 @@ export class VectorIndex {
       const current = candidates.node;
       if (found.size >= ef && compare(current, candidates.distance, found.node, found.distance, this.ids) > 0) break;
       candidates.pop();
+      if (++work.steps >= work.quantum) { work.steps = 0; yield; }
       const neighbors = this.neighbors[current][level];
       for (let i = 0; i < neighbors.length; i++) {
+        if (++work.steps >= work.quantum) { work.steps = 0; yield; }
         const node = neighbors[i];
         if (visited[node] === stamp) continue;
         visited[node] = stamp;
@@ -354,7 +464,6 @@ export class VectorIndex {
             else found.replace(node, distance);
           }
         }
-        if (++work.steps >= work.quantum) { work.steps = 0; yield; }
       }
     }
     return found;
@@ -367,12 +476,13 @@ export class VectorIndex {
     return { nodes, distances };
   }
 
-  private *select(nodes: number[], distances: number[], limit: number, work: Work): Generator<void, number[]> {
+  private *select(nodes: number[], distances: number[], limit: number, work: Work, fill = true): Generator<void, number[]> {
     const selected: number[] = [];
     const pruned: number[] = [];
     // Prefer live connections; use dead ones only when a layer lacks live nodes.
     for (let pass = 0; pass < 2; pass++) {
       for (let i = 0; i < nodes.length; i++) {
+        if (++work.steps >= work.quantum) { work.steps = 0; yield; }
         const node = nodes[i];
         if (Boolean(this.active[node]) !== (pass === 0)) continue;
         let diverse = true;
@@ -385,7 +495,7 @@ export class VectorIndex {
         else pruned.push(node);
         if (selected.length === limit) return selected;
       }
-      for (const node of pruned) { selected.push(node); if (selected.length === limit) return selected; }
+      if (fill) for (const node of pruned) { selected.push(node); if (selected.length === limit) return selected; }
       pruned.length = 0;
     }
     return selected;
@@ -404,13 +514,17 @@ export class VectorIndex {
       this.count = this.capacityValue = this.linkCount = this.idCharacters = 0;
       this.entryPoint = this.maxLevel = -1;
       this.randomState = SEED;
+      this.pairCache?.keys.fill(0);
+      this.disableKernel();
+      this.kernel = this.createKernel();
     }
-    if (this.idCharacters + id.length > MAX_ID_CHARACTERS || (this.options.type === 'hnsw' && this.linkCount + 2 * this.options.m * (MAX_LEVEL + 1) > MAX_LINKS)) invalid('Vector index graph exceeds its safe in-memory capacity; compact or split the collection.', 'INDEX_CAPACITY');
+    if (this.idCharacters + id.length > MAX_ID_CHARACTERS || (this.options.type === 'hnsw' && this.linkCount + 3 * this.options.m * (MAX_LEVEL + 1) > MAX_LINKS)) invalid('Vector index graph exceeds its safe in-memory capacity; compact or split the collection.', 'INDEX_CAPACITY');
     this.ensureCapacity(this.count + 1);
     const previous = this.lookup.get(id);
     const node = this.count++;
     const level = this.options.type === 'hnsw' ? this.randomLevel() : 0;
     this.rows.set(vector, node * this.dimension);
+    this.appendKernel(node);
     this.ids.push(id);
     this.levels.push(level);
     this.neighbors.push(Array.from({ length: level + 1 }, () => []));
@@ -420,6 +534,7 @@ export class VectorIndex {
     this.lookup.set(id, node);
     if (this.entryPoint === -1) { this.entryPoint = node; this.maxLevel = level; this.version++; return; }
     if (this.options.type === 'flat') { this.version++; return; }
+    if (!this.pairCache) this.pairCache = { keys: new Float64Array(PAIR_CACHE_SIZE), values: new Float64Array(PAIR_CACHE_SIZE) };
     const query = this.rows.subarray(node * this.dimension, (node + 1) * this.dimension);
     const workspace = this.acquire();
     try {
@@ -444,7 +559,7 @@ export class VectorIndex {
               if (++work.steps >= work.quantum) { work.steps = 0; yield; }
             }
             const ordered = this.sorted(workspace.pruning);
-            const retained = yield* this.select(ordered.nodes, ordered.distances, cap, work);
+            const retained = yield* this.select(ordered.nodes, ordered.distances, cap, work, false);
             this.neighbors[neighbor][layer] = retained;
             this.linkCount += retained.length - links.length;
           }
@@ -458,9 +573,14 @@ export class VectorIndex {
     }
   }
 
-  add(id: string, preparedVector: Float32Array): void { this.sync(this.insert(id, preparedVector, this.work())); }
+  add(id: string, preparedVector: Float32Array): void {
+    this.assertUsable();
+    if (!(preparedVector instanceof Float32Array)) invalid('Index vectors must be prepared Float32Array values.');
+    this.sync(this.insert(id, preparedVector.slice(), this.work()));
+  }
 
   remove(id: string): boolean {
+    this.assertUsable();
     const node = this.lookup.get(id);
     if (node === undefined) return false;
     this.active[node] = 0;
@@ -477,8 +597,11 @@ export class VectorIndex {
     return Math.min(scoreLimit, distanceLimit);
   }
 
-  private matches(heap: NodeHeap, topK: number, limit: number): IndexMatch[] {
-    while (heap.size && (heap.size > topK || heap.distance > limit)) heap.pop();
+  private *matches(heap: NodeHeap, topK: number, limit: number, work: Work): Generator<void, IndexMatch[]> {
+    while (heap.size && (heap.size > topK || heap.distance > limit)) {
+      heap.pop();
+      if (++work.steps >= work.quantum) { work.steps = 0; yield; }
+    }
     const results = new Array<IndexMatch>(heap.size);
     for (let i = heap.size - 1; i >= 0; i--) {
       const rank = heap.distance;
@@ -487,6 +610,7 @@ export class VectorIndex {
         const distance = Math.sqrt(rank);
         results[i] = { id, score: distance === 0 ? 0 : -distance, distance };
       } else results[i] = { id, score: rank === 0 ? 0 : -rank };
+      if (++work.steps >= work.quantum) { work.steps = 0; yield; }
     }
     return results;
   }
@@ -509,7 +633,7 @@ export class VectorIndex {
       }
       if (++work.steps >= work.quantum) { work.steps = 0; yield; }
     }
-    return this.matches(heap, k, limit);
+    return yield* this.matches(heap, k, limit, work);
   }
 
   private *ann(query: Float32Array, options: VectorSearchOptions, workspace: Workspace, work: Work): Generator<void, IndexMatch[]> {
@@ -517,13 +641,16 @@ export class VectorIndex {
     const ef = Math.min(this.size, Math.max(options.topK, options.efSearch ?? this.options.efSearch));
     const found = yield* this.layer(query, [entry], ef, 0, workspace, work, true);
     // Severe churn or degenerate disconnected ties must not silently underfill.
-    if (found.size < Math.min(options.topK, this.size)) return yield* this.exact(query, options, workspace, work);
-    return this.matches(found, options.topK, this.rankLimit(options));
+    if (found.size < Math.min(options.topK, this.size) || (ef === this.size && found.size < ef)) return yield* this.exact(query, options, workspace, work);
+    return yield* this.matches(found, options.topK, this.rankLimit(options), work);
   }
 
   async search(query: Float32Array, options: VectorSearchOptions): Promise<IndexMatch[]> {
     checkAbort(options?.signal);
-    this.validateVector(query);
+    this.assertUsable();
+    if (!(query instanceof Float32Array)) invalid('Index queries must be prepared Float32Array values.');
+    const preparedQuery = query.slice();
+    this.validateVector(preparedQuery);
     if (!options) invalid('Vector search options are required.');
     integer(options.topK, 'topK', 0, MAX_ROWS);
     if (options.efSearch !== undefined) integer(options.efSearch, 'efSearch', 1, 65536);
@@ -532,9 +659,9 @@ export class VectorIndex {
     if (options.minScore !== undefined && !Number.isFinite(options.minScore)) invalid('minScore must be finite.');
     if (options.maxDistance !== undefined && (this.metric !== 'euclidean' || !Number.isFinite(options.maxDistance) || options.maxDistance < 0)) invalid('maxDistance must be nonnegative and finite, and is only valid with the Euclidean metric.');
     if (options.scores !== undefined && (!(options.scores instanceof Float32Array) || options.scores.length !== this.count)) invalid('Precomputed distances must have one float32 value per physical row.');
+    if (this.rankLimit(options) < 0 && this.metric === 'euclidean') return [];
     if (!this.size || options.topK === 0) return [];
     const settings = { ...options };
-    const preparedQuery = query.slice();
     const work = this.work();
     const state: CooperativeState = { signal: settings.signal, version: this.version, deadline: clock() + TASK_BUDGET_MS };
     const workspace = this.acquire();
@@ -549,37 +676,136 @@ export class VectorIndex {
 
   async rebuild(records?: Iterable<{ id: string; vector: Float32Array }>, options: { signal?: AbortSignal } = {}): Promise<void> {
     checkAbort(options.signal);
+    this.assertUsable();
     const state: CooperativeState = { signal: options.signal, version: this.version, deadline: clock() + TASK_BUDGET_MS };
-    const next = new VectorIndex(this.dimension, this.metric, this.options);
-    const work = this.work();
-    const current = this;
-    const source = records ?? (function* () {
-      for (let node = 0; node < current.count; node++) if (current.active[node]) yield { id: current.ids[node], vector: current.rows.subarray(node * current.dimension, (node + 1) * current.dimension) };
-    })();
-    if (options.signal) { await yieldTask(options.signal); this.assertVersion(state.version); }
-    for (const record of source) await this.cooperate(next.insert(record.id, record.vector, work), state);
-    checkAbort(options.signal);
-    this.assertVersion(state.version);
-    this.rows = next.rows.slice(0, next.count * this.dimension);
-    this.active = next.active.slice(0, next.count);
-    this.capacityValue = next.count;
-    this.ids = next.ids;
-    this.levels = next.levels;
-    this.neighbors = next.neighbors;
-    this.lookup = next.lookup;
-    this.count = next.count;
-    this.entryPoint = next.entryPoint;
-    this.maxLevel = next.maxLevel;
-    this.randomState = next.randomState;
-    this.linkCount = next.linkCount;
-    this.idCharacters = next.idCharacters;
-    this.workspaces = [];
-    this.version++;
+    const next = new VectorIndex(this.dimension, this.metric, this.options, this.kernelFactory);
+    try {
+      const expectedCount = records === undefined ? this.size : Array.isArray(records) ? records.length : 0;
+      if (expectedCount) {
+        if (expectedCount > MAX_ROWS || expectedCount * this.dimension > MAX_ELEMENTS) invalid('Vector index exceeds its safe in-memory capacity.', 'INDEX_CAPACITY');
+        next.rows = new Float32Array(expectedCount * this.dimension);
+        next.active = new Uint8Array(expectedCount);
+        next.capacityValue = expectedCount;
+      }
+      const work = this.work();
+      const current = this;
+      const source = records ?? (function* () {
+        for (let node = 0; node < current.count; node++) if (current.active[node]) yield { id: current.ids[node], vector: current.rows.subarray(node * current.dimension, (node + 1) * current.dimension) };
+      })();
+      if (options.signal) { await yieldTask(options.signal); this.assertVersion(state.version); }
+      for (const record of source) {
+        if (!(record.vector instanceof Float32Array)) invalid('Index vectors must be prepared Float32Array values.');
+        await this.cooperate(next.insert(record.id, record.vector.slice(), work), state);
+      }
+      checkAbort(options.signal);
+      this.assertVersion(state.version);
+      this.rows = next.rows;
+      this.active = next.active;
+      this.capacityValue = next.capacityValue;
+      this.ids = next.ids;
+      this.levels = next.levels;
+      this.neighbors = next.neighbors;
+      this.lookup = next.lookup;
+      this.count = next.count;
+      this.entryPoint = next.entryPoint;
+      this.maxLevel = next.maxLevel;
+      this.randomState = next.randomState;
+      this.linkCount = next.linkCount;
+      this.idCharacters = next.idCharacters;
+      this.workspaces = [];
+      this.pairCache = undefined;
+      const oldKernel = this.kernel;
+      this.kernel = next.kernel;
+      next.kernel = undefined;
+      this.version++;
+      this.disposeKernel(oldKernel);
+    } finally {
+      next.dispose();
+    }
   }
 
   compact(options: { signal?: AbortSignal } = {}): Promise<void> { return this.rebuild(undefined, options); }
 
+  async precomputeDistances(query: Float32Array, signal?: AbortSignal): Promise<Float32Array | undefined> {
+    checkAbort(signal);
+    this.assertUsable();
+    if (!(query instanceof Float32Array)) invalid('Index queries must be prepared Float32Array values.');
+    const prepared = query.slice();
+    this.validateVector(prepared);
+    const kernel = this.kernel;
+    if (!kernel?.score) return undefined;
+    const score = kernel.score;
+    const previous = Array.from(this.pendingScores, state => state.completion);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    let finish!: () => void;
+    const completion = new Promise<void>(resolve => { finish = resolve; });
+    const state = { signal, version: this.version, deadline: clock() + TASK_BUDGET_MS, cancelled: () => controller.signal.aborted, completion, controller };
+    this.pendingScores.add(state);
+    const operation = (async () => {
+      await Promise.all(previous);
+      checkAbort(signal);
+      checkAbort(controller.signal);
+      this.assertVersion(state.version);
+      if (this.kernel !== kernel) return undefined;
+      try {
+        const scored = await score.call(kernel, prepared, controller.signal);
+        checkAbort(signal);
+        checkAbort(controller.signal);
+        this.assertVersion(state.version);
+        if (!(scored instanceof Float32Array) || scored.length !== this.count) invalid('Invalid accelerated distance output.');
+        const scores = scored.slice();
+        const work = this.work();
+        const metric = this.metric;
+        await this.cooperate((function* () {
+          for (let node = 0; node < scores.length; node++) {
+            if (!Number.isFinite(scores[node]) || (metric === 'euclidean' && scores[node] < 0)) invalid('Invalid accelerated distance value.');
+            if (++work.steps >= work.quantum) { work.steps = 0; yield; }
+          }
+        })(), state);
+        return scores;
+      } catch {
+        checkAbort(signal);
+        checkAbort(controller.signal);
+        this.assertVersion(state.version);
+        if (this.kernel === kernel) this.disableKernel();
+        return undefined;
+      }
+    })().finally(() => {
+      this.pendingScores.delete(state);
+      signal?.removeEventListener('abort', abort);
+      finish();
+    });
+    let rejectAbort!: (reason: unknown) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    const onAbort = () => rejectAbort(new DOMException('Operation aborted.', 'AbortError'));
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+    if (controller.signal.aborted) onAbort();
+    try { return await Promise.race([operation, aborted]); }
+    finally { controller.signal.removeEventListener('abort', onAbort); }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.version++;
+    for (const state of this.pendingScores) state.controller.abort();
+    this.disableKernel();
+    this.rows = new Float32Array(0);
+    this.active = new Uint8Array(0);
+    this.ids = [];
+    this.levels = [];
+    this.neighbors = [];
+    this.lookup = new Map();
+    this.workspaces = [];
+    this.pairCache = undefined;
+    this.count = this.capacityValue = this.linkCount = this.idCharacters = 0;
+    this.entryPoint = this.maxLevel = -1;
+  }
+
   exportSnapshot(): IndexSnapshot {
+    this.assertUsable();
     return {
       format: FORMAT,
       dimension: this.dimension,
@@ -596,9 +822,10 @@ export class VectorIndex {
     };
   }
 
-  static fromSnapshot(snapshot: IndexSnapshot): VectorIndex {
+  static fromSnapshot(snapshot: IndexSnapshot, kernelFactory?: VectorDistanceKernelFactory): VectorIndex {
     const bad = (message: string): never => invalid(`Invalid vector index snapshot: ${message}`, 'INVALID_INDEX_SNAPSHOT');
     if (!snapshot || typeof snapshot !== 'object' || snapshot.format !== FORMAT) bad('unsupported format.');
+    if (kernelFactory !== undefined && typeof kernelFactory !== 'function') bad('invalid distance kernel factory.');
     const index = new VectorIndex(snapshot.dimension, snapshot.metric, snapshot.options);
     if (!Array.isArray(snapshot.ids)) bad('ids must be an array.');
     const count = snapshot.ids.length;
@@ -608,6 +835,7 @@ export class VectorIndex {
     if (!Array.isArray(snapshot.levels) || snapshot.levels.length !== count || !Array.isArray(snapshot.neighbors) || snapshot.neighbors.length !== count) bad('graph lengths.');
     if (!Number.isInteger(snapshot.randomState) || snapshot.randomState < 1 || snapshot.randomState > 0xffffffff) bad('random state.');
     if (!Number.isInteger(snapshot.entryPoint) || !Number.isInteger(snapshot.maxLevel)) bad('entry point or maximum level.');
+    if (!(snapshot.vectors.buffer instanceof ArrayBuffer) || !(snapshot.active.buffer instanceof ArrayBuffer)) bad('shared matrix buffers are not valid persisted snapshots.');
     let maximum = -1;
     let links = 0;
     let idCharacters = 0;
@@ -630,10 +858,9 @@ export class VectorIndex {
         if (!Array.isArray(neighbors) || neighbors.length > cap) bad('degree limit exceeded.');
         links += neighbors.length;
         if (links > MAX_LINKS) bad('unsafe graph size.');
-        const unique = new Set<number>();
-        for (const neighbor of neighbors) {
-          if (!Number.isInteger(neighbor) || neighbor < 0 || neighbor >= count || neighbor === node || snapshot.levels[neighbor] < layer || unique.has(neighbor)) bad('invalid or duplicate neighbor.');
-          unique.add(neighbor);
+        for (let i = 0; i < neighbors.length; i++) {
+          const neighbor = neighbors[i];
+          if (!Number.isInteger(neighbor) || neighbor < 0 || neighbor >= count || neighbor === node || snapshot.levels[neighbor] < layer || neighbors.indexOf(neighbor) !== i) bad('invalid or duplicate neighbor.');
         }
       }
       let nonzero = false;
@@ -658,6 +885,9 @@ export class VectorIndex {
     index.randomState = snapshot.randomState;
     index.linkCount = links;
     index.idCharacters = idCharacters;
+    index.kernelFactory = kernelFactory;
+    index.kernel = index.createKernel();
+    if (index.kernel) for (let node = 0; node < count && index.kernel; node++) index.appendKernel(node);
     return index;
   }
 }

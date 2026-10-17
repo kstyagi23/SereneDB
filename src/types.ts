@@ -148,6 +148,8 @@ export interface OpenOptions {
   blockedTimeoutMs?: number;
   wasm?: boolean;
   maxResidentCollections?: number;
+  maxResidentModels?: number;
+  operationTimeoutMs?: number;
 }
 
 export interface IndexMatch {

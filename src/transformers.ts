@@ -28,7 +28,7 @@ export function transformersEmbedder(options: Partial<TransformersConfig> & Pick
     documentPrefix: options.documentPrefix === undefined ? '' : options.documentPrefix,
     maxTokens: options.maxTokens === undefined ? 512 : options.maxTokens,
     batchSize: options.batchSize === undefined ? 16 : options.batchSize,
-    batchTokens: options.batchTokens === undefined ? Math.max(8192, options.maxTokens ?? 512) : options.batchTokens,
+    batchTokens: options.batchTokens === undefined ? 8192 : options.batchTokens,
     allowRemoteModels: options.allowRemoteModels === undefined ? true : options.allowRemoteModels,
   };
   if (options.provider !== undefined && options.provider !== 'transformers') invalid('Embedding provider must be transformers.');
@@ -44,6 +44,7 @@ export function transformersEmbedder(options: Partial<TransformersConfig> & Pick
   }
   integer(config.maxTokens, 'maxTokens', 1, 32768);
   integer(config.batchSize, 'batchSize', 1, 256);
+  if (options.batchTokens === undefined) config.batchTokens = Math.max(config.batchTokens, config.maxTokens);
   integer(config.batchTokens, 'batchTokens', config.maxTokens, 1048576);
   for (const key of ['localModelPath', 'wasmPath'] as const) {
     if (options[key] === undefined) continue;
@@ -114,6 +115,7 @@ function wasmPaths(path?: string): { mjs: string; wasm: string } {
 
 // ONNX backend initialization is realm-global and cannot be reset by disposing a model.
 const wasmReservations = new WeakMap<WasmSettings, { mjs: string; wasm: string }>();
+const modelSources = new WeakMap<Runtime['env'], Map<string, string>>();
 let loaderQueue = Promise.resolve();
 
 function configureWasm(runtime: Runtime, config: TransformersConfig): void {
@@ -147,8 +149,17 @@ function loadWithEnvironment(runtime: Runtime, config: TransformersConfig, optio
       allowRemoteModels: config.allowRemoteModels,
       useBrowserCache: typeof caches !== 'undefined',
       useWasmCache: typeof caches !== 'undefined' || env.useWasmCache === true,
+      // v4's tokenizer-file metadata probe drops revision; keep that probe pinned too.
+      remotePathTemplate: (typeof env.remotePathTemplate === 'string' ? env.remotePathTemplate : '{model}/resolve/{revision}/').replaceAll('{revision}', encodeURIComponent(config.revision)),
     };
     if (config.localModelPath) settings.localModelPath = `${config.localModelPath.replace(/\/$/, '')}/`;
+    // v4 memoizes metadata/config by model + revision, not by the global local root.
+    const key = JSON.stringify([config.model, config.revision, !config.allowRemoteModels]);
+    const source = JSON.stringify([settings.allowLocalModels ? settings.localModelPath ?? env.localModelPath : null, env.remoteHost ?? null, env.remotePathTemplate ?? null]);
+    const sources = modelSources.get(env) ?? new Map<string, string>();
+    if (sources.has(key) && sources.get(key) !== source) invalid('This model/revision has already used a different local model root or remote host in the shared runtime. Use a separate worker to avoid cached model/config provenance collisions.', 'EMBEDDING_ENV_CONFLICT');
+    sources.set(key, source);
+    modelSources.set(env, sources);
     const changed: Array<{ key: string; previous: unknown; own: boolean; value: unknown }> = [];
     let pipeline: EmbeddingPipeline | undefined;
     try {
@@ -167,7 +178,7 @@ function loadWithEnvironment(runtime: Runtime, config: TransformersConfig, optio
         else delete env[entry.key];
       }
       if (conflicts.length) {
-        await pipeline?.dispose();
+        try { await pipeline?.dispose(); } catch { /* Preserve the actionable environment conflict. */ }
         invalid(`Shared Transformers.js env changed during loading (${conflicts.map(entry => entry.key).join(', ')}). Serialize external model loaders too, or isolate them in separate workers.`, 'EMBEDDING_ENV_CONFLICT');
       }
     }
@@ -276,6 +287,7 @@ export class TransformersEmbedding {
   }
 
   async encodeDocuments(texts: string[], options: OperationOptions = {}): Promise<Float32Array[]> {
+    options = { ...options };
     checkAbort(options.signal);
     if (!Array.isArray(texts)) invalid('Documents must be an array of strings.');
     const copy = Array.from(texts);
@@ -283,10 +295,12 @@ export class TransformersEmbedding {
   }
 
   async encodeQuery(text: string, options: OperationOptions = {}): Promise<Float32Array> {
+    options = { ...options };
     return this.enqueue(async () => (await this.encode([text], this.config.queryPrefix, options))[0], options);
   }
 
   async preload(options: OperationOptions = {}): Promise<void> {
+    options = { ...options };
     return this.enqueue(async () => {
       const pipeline = await this.getPipeline(options);
       if (this.warmed) return;
@@ -321,7 +335,10 @@ export class TransformersEmbedding {
     const pending = this.queue.then(async () => {
       this.assertOpen();
       checkAbort(options.signal);
-      return work();
+      const result = await work();
+      checkAbort(options.signal);
+      this.assertOpen();
+      return result;
     });
     // Aborting a caller must not free the queue while its native inference is still running.
     this.queue = pending.then(() => undefined, () => undefined);
@@ -453,7 +470,14 @@ export class TransformersEmbedding {
       checkAbort(options.signal);
       if (i > 0 && i % 16 === 0) { await yieldTurn(); checkAbort(options.signal); }
       const text = prefix + texts[i];
-      const ids = pipeline.tokenizer([text], { padding: false, truncation: true, max_length: this.config.maxTokens, return_tensor: false }).input_ids;
+      let ids: unknown;
+      try {
+        ids = pipeline.tokenizer([text], { padding: false, truncation: true, max_length: this.config.maxTokens, return_tensor: false }).input_ids;
+      } catch (cause) {
+        checkAbort(options.signal);
+        if (cause instanceof SereneDBError) throw cause;
+        throw new SereneDBError('Text tokenization failed. Check tokenizer/model compatibility and maxTokens, and chunk large inputs before embedding.', 'EMBEDDING_MODEL', { cause });
+      }
       // If an alternate tokenizer cannot expose lengths, budget its entire truncation limit.
       let length = this.config.maxTokens;
       const known = Array.isArray(ids) && ids.length === 1 && Array.isArray(ids[0]);

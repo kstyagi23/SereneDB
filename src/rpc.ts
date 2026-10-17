@@ -19,19 +19,23 @@ interface Pending {
   reject: (error: unknown) => void;
   options: OperationOptions;
   abort?: () => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class WorkerConnection implements Connection {
   private nextId = 0;
   private pending = new Map<number, Pending>();
   private closed = false;
-  private constructor(private worker: Worker) {
+  private terminal: Promise<unknown> | null = null;
+  private terminalMethod: string | null = null;
+  private constructor(private worker: Worker, private timeout: number) {
     worker.onmessage = event => {
       const message = event.data as { id: number; result?: unknown; error?: SerializedError; progress?: ProgressEvent };
       const pending = this.pending.get(message.id);
       if (!pending) return;
       if (message.progress) { try { pending.options.onProgress?.(message.progress); } catch { /* Progress is an observer. */ } return; }
       this.pending.delete(message.id);
+      clearTimeout(pending.timer);
       if (pending.abort) pending.options.signal?.removeEventListener('abort', pending.abort);
       if (message.error) {
         const error = message.error.name === 'AbortError' ? new DOMException(message.error.message, 'AbortError') : new SereneDBError(message.error.message, message.error.code ?? 'WORKER_OPERATION');
@@ -44,7 +48,9 @@ export class WorkerConnection implements Connection {
 
   static async open(name: string, options: OpenOptions): Promise<WorkerConnection> {
     const worker = new Worker(options.workerUrl ?? new URL('./worker.js', import.meta.url), { type: 'module', name: `SereneDB:${name}` });
-    const connection = new WorkerConnection(worker);
+    const timeout = options.operationTimeoutMs ?? 300000;
+    if (!Number.isFinite(timeout) || timeout < 1000 || timeout > 3600000) { worker.terminate(); throw new RangeError('operationTimeoutMs must be between 1000 and 3600000.'); }
+    const connection = new WorkerConnection(worker, timeout);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -57,12 +63,16 @@ export class WorkerConnection implements Connection {
   }
 
   call<T>(method: string, args: unknown[] = [], options: OperationOptions = {}): Promise<T> {
+    options = { ...options };
     if (this.closed) return Promise.reject(new SereneDBError('Database connection is closed.', 'CLOSED'));
-    if (this.pending.size >= 128) return Promise.reject(new SereneDBError('Database queue is full.', 'BACKPRESSURE'));
+    const terminal = method === 'close' || method === 'destroy';
+    if (this.terminal) return terminal && method === this.terminalMethod ? this.terminal as Promise<T> : Promise.reject(new SereneDBError('Database is closing; no different terminal operation or new work is accepted.', 'CLOSED'));
+    if (this.pending.size >= 128 && !terminal) return Promise.reject(new SereneDBError('Database queue is full.', 'BACKPRESSURE'));
     try { checkAbort(options.signal); } catch (error) { return Promise.reject(error); }
     const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
+    const operation = new Promise<T>((resolve, reject) => {
       const pending: Pending = { resolve: resolve as (value: unknown) => void, reject, options };
+      pending.timer = setTimeout(() => this.fail(new SereneDBError(`Database worker operation timed out after ${this.timeout} ms. Its commit status may be unknown; reopen and inspect the operation IDs.`, 'WORKER_TIMEOUT')), this.timeout);
       if (options.signal) {
         pending.abort = () => { if (!this.closed) this.worker.postMessage({ cancel: id }); };
         options.signal.addEventListener('abort', pending.abort, { once: true });
@@ -78,13 +88,19 @@ export class WorkerConnection implements Connection {
       // Collection owns its cloned input buffers, so transfer never detaches caller data.
       if (method === 'upsert' || method === 'search') collect(args);
       try { this.worker.postMessage({ id, method, args }, Array.from(buffers)); }
-      catch (error) { this.pending.delete(id); if (pending.abort) options.signal?.removeEventListener('abort', pending.abort); reject(error); }
+      catch (error) { this.pending.delete(id); clearTimeout(pending.timer); if (pending.abort) options.signal?.removeEventListener('abort', pending.abort); reject(error); }
     });
+    if (terminal) {
+      this.terminal = operation;
+      this.terminalMethod = method;
+      void operation.catch(() => { if (!this.closed) { this.terminal = null; this.terminalMethod = null; } });
+    }
+    return operation;
   }
 
   private fail(error: Error): void {
     this.closed = true;
-    for (const pending of this.pending.values()) { if (pending.abort) pending.options.signal?.removeEventListener('abort', pending.abort); pending.reject(error); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); if (pending.abort) pending.options.signal?.removeEventListener('abort', pending.abort); pending.reject(error); }
     this.pending.clear(); this.worker.terminate();
   }
   terminate(): void { this.fail(new SereneDBError('Database connection is closed.', 'CLOSED')); }

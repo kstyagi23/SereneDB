@@ -490,6 +490,22 @@ test('blocked destruction times out only after an atomic terminal reset, and eve
   assert.deepEqual(await fresh.listCollections(), []);
 });
 
+test('concurrent destruction is fail-closed and cannot affect a replacement database', async t => {
+  const first = await storage(t);
+  await first.ensureCollection('docs', schema());
+  const peer = await Storage.open(first.name);
+  t.after(() => peer.close());
+  const results = await Promise.allSettled([first.destroy(), peer.destroy()]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult;
+  assert.ok(['DATABASE_DESTROYING', 'DATABASE_CLOSED'].includes(rejected.reason.code));
+  const replacement = await Storage.open(first.name);
+  t.after(() => replacement.close());
+  await replacement.ensureCollection('new', schema());
+  await assert.rejects(peer.destroy());
+  assert.equal((await replacement.listCollections())[0].name, 'new');
+});
+
 test('aborting the destructive transaction rolls back the root and all data and leaves the connection usable', async t => {
   const db = await storage(t);
   await db.ensureCollection('docs', schema());
@@ -529,6 +545,45 @@ test('abort after the terminal reset stops waiting but cannot cancel pending phy
   assert.deepEqual(await fresh.listCollections(), []);
 });
 
+test('root destruction invalidates peers even when physical delete cannot be started', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', schema());
+  await db.mutate('docs', { upserts: [record('a')] });
+  const peer = await Storage.open(db.name);
+  t.after(() => peer.close());
+  const factory = indexedDB;
+  const original = factory.deleteDatabase;
+  factory.deleteDatabase = () => { throw new DOMException('Physical deletion denied', 'SecurityError'); };
+  try { await assert.rejects(db.destroy(), { name: 'SecurityError' }); }
+  finally { factory.deleteDatabase = original; }
+  await assert.rejects(peer.listCollections(), code('DATABASE_DESTROYING'));
+  await assert.rejects(Storage.open(db.name), code('DATABASE_DESTROYING'));
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(db.name);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+  const replacement = await Storage.open(db.name);
+  t.after(() => replacement.close());
+  assert.deepEqual(await replacement.listCollections(), []);
+});
+
+test('completed physical deletion still resolves when an earlier completion listener aborts the signal', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', schema());
+  const factory = indexedDB;
+  const original = factory.deleteDatabase;
+  const controller = new AbortController();
+  factory.deleteDatabase = function (name: string): IDBOpenDBRequest {
+    const request = original.call(this, name);
+    request.addEventListener('success', () => controller.abort(), { once: true });
+    return request;
+  };
+  try { await db.destroy(controller.signal); }
+  finally { factory.deleteDatabase = original; }
+  assert.equal(controller.signal.aborted, true);
+});
+
 test('unexpected IndexedDB close is reported explicitly', async t => {
   const name = `storage-test-${++sequence}`;
   const original = IDBDatabase.prototype.transaction;
@@ -543,7 +598,8 @@ test('unexpected IndexedDB close is reported explicitly', async t => {
   t.after(() => db.close());
   assert.ok(connection);
   const closed = new Promise<void>(resolve => connection!.addEventListener('close', () => resolve(), { once: true }));
-  forceCloseDatabase(connection!);
+  // fake-indexeddb types this helper as a constructor, but it takes an instance.
+  (forceCloseDatabase as unknown as (db: IDBDatabase) => void)(connection!);
   await closed;
   await assert.rejects(db.listCollections(), error => code('DATABASE_CLOSED')(error) && /unexpectedly/.test((error as Error).message));
 });
@@ -577,6 +633,19 @@ test('strict durability falls back only when transaction options are unsupported
   finally { IDBDatabase.prototype.transaction = original; }
   assert.equal(calls, 1);
   assert.deepEqual(await strict.listCollections(), []);
+});
+
+test('an explicit relaxed durability choice is passed unchanged to readwrite transactions', async t => {
+  const db = await storage(t, { durability: 'relaxed' });
+  const original = IDBDatabase.prototype.transaction;
+  const observed: string[] = [];
+  IDBDatabase.prototype.transaction = function (...args: any[]): IDBTransaction {
+    if (args[1] === 'readwrite') observed.push(args[2]?.durability);
+    return Reflect.apply(original, this, args);
+  };
+  try { await db.ensureCollection('docs', schema()); }
+  finally { IDBDatabase.prototype.transaction = original; }
+  assert.deepEqual(observed, ['relaxed']);
 });
 
 test('legacy upgrades fail without deleting, converting, or changing original records', async t => {

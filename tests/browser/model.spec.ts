@@ -21,8 +21,13 @@ test('real model embeddings, schema, cached assets, and offline worker restart',
     return { first: response.results[0].id, dimension: state.schema.dimension, rejected, score: response.results[0].score };
   }, name);
   expect(result.first).toBe('database'); expect(result.dimension).toBe(384); expect(result.rejected).toBe(true);
+  console.log('Model cache:', await page.evaluate(async () => {
+    const result: Record<string, string[]> = {};
+    for (const key of await caches.keys()) result[key] = (await (await caches.open(key)).keys()).map(request => request.url);
+    return result;
+  }));
   const remote: string[] = [];
-  await context.route('**/*', async route => { const url = route.request().url(); if (!url.startsWith('http://127.0.0.1:4173')) { remote.push(url); await route.abort(); } else await route.continue(); });
+  await context.route('**/*', async route => { const url = route.request().url(); if (!url.startsWith('http://127.0.0.1:4173')) { remote.push(url); console.log('Unexpected offline request:', url); await route.abort(); } else await route.continue(); });
   await page.reload();
   const offline = await page.evaluate(async name => {
     const db = await window.SereneDB.open(name), docs = await db.collection('docs');

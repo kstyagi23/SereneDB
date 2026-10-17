@@ -15,6 +15,41 @@ pub extern "C" fn release(pointer: *mut u8, bytes: usize) {
     }
 }
 
+#[inline]
+unsafe fn distance(a: *const f32, b: *const f32, dimension: usize, euclidean: u32) -> f32 {
+    let mut accumulator = f32x4_splat(0.0);
+    let mut i = 0;
+    while i + 4 <= dimension {
+        let x = unsafe { v128_load(a.add(i) as *const v128) };
+        let y = unsafe { v128_load(b.add(i) as *const v128) };
+        let product = if euclidean == 1 {
+            let d = f32x4_sub(x, y);
+            f32x4_mul(d, d)
+        } else { f32x4_mul(x, y) };
+        accumulator = f32x4_add(accumulator, product);
+        i += 4;
+    }
+    let mut sum = f32x4_extract_lane::<0>(accumulator) + f32x4_extract_lane::<1>(accumulator)
+        + f32x4_extract_lane::<2>(accumulator) + f32x4_extract_lane::<3>(accumulator);
+    while i < dimension {
+        let x = unsafe { *a.add(i) };
+        let y = unsafe { *b.add(i) };
+        sum += if euclidean == 1 { (x - y) * (x - y) } else { x * y };
+        i += 1;
+    }
+    if euclidean == 1 { sum } else { -sum }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn row_distance(rows: *const f32, query: *const f32, row: usize, dimension: usize, euclidean: u32) -> f32 {
+    unsafe { distance(rows.add(row * dimension), query, dimension, euclidean) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn row_between(rows: *const f32, a: usize, b: usize, dimension: usize, euclidean: u32) -> f32 {
+    unsafe { distance(rows.add(a * dimension), rows.add(b * dimension), dimension, euclidean) }
+}
+
 // Rows and the query are float32; output is negative dot or squared L2.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scan(

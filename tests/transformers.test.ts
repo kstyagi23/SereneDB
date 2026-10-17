@@ -33,9 +33,10 @@ function fakeRuntime(hooks: {
   const env: Runtime['env'] = {
     version: '4.3.1-test', allowLocalModels: false, allowRemoteModels: true,
     localModelPath: '/original/', useBrowserCache: false, useWasmCache: false,
+    remoteHost: 'https://huggingface.co/', remotePathTemplate: '{model}/resolve/{revision}/',
     backends: { onnx: { wasm: { numThreads: 8 } } },
   };
-  const snapshot = () => Object.fromEntries(['allowLocalModels', 'allowRemoteModels', 'localModelPath', 'useBrowserCache', 'useWasmCache'].map(key => [key, env[key]]));
+  const snapshot = () => Object.fromEntries(['allowLocalModels', 'allowRemoteModels', 'localModelPath', 'useBrowserCache', 'useWasmCache', 'remotePathTemplate'].map(key => [key, env[key]]));
   const runtime: Runtime = {
     env,
     AutoTokenizer: { from_pretrained: async (model, options) => {
@@ -108,7 +109,7 @@ test('config rejects malformed, unsupported, and unbounded options', () => {
     { device: 'cpu' }, { pooling: 'none' }, { pooling: 'max' }, { normalize: 1 },
     { allowRemoteModels: 'false' }, { queryPrefix: null }, { documentPrefix: 2 },
     { queryPrefix: 'x'.repeat(8193) }, { batchSize: 0 }, { batchSize: 1.5 }, { batchSize: 257 },
-    { maxTokens: 0 }, { maxTokens: 32769 }, { batchTokens: 511 }, { batchTokens: Infinity },
+    { maxTokens: 0 }, { maxTokens: 32769 }, { maxTokens: 2n }, { batchTokens: 511 }, { batchTokens: Infinity },
     { localModelPath: '' }, { wasmPath: '' }, { wasmPath: 'javascript:alert(1)' },
     { wasmPath: '/runtime/?v=2' }, { localModelPath: '/models/#tag' }, { unknown: true },
   ]) {
@@ -381,6 +382,35 @@ test('external env changes during loading are not overwritten and abort the load
   await adapter.dispose();
 });
 
+test('same model/revision cannot reuse memoized configs from a different local root', async () => {
+  const fake = fakeRuntime();
+  const first = embedding(fake, { localModelPath: '/models/version-one/' });
+  const second = embedding(fake, { localModelPath: '/models/version-two/' });
+  await first.preload();
+  await assert.rejects(second.preload(), code('EMBEDDING_ENV_CONFLICT'));
+  assert.equal(fake.counts().pipelines, 1);
+  await Promise.all([first.dispose(), second.dispose()]);
+});
+
+test('tokenizer metadata preflight stays pinned even when upstream omits revision', async () => {
+  const revision = 'c'.repeat(40);
+  const cached = new Set([`https://huggingface.co/test/embedding-model/resolve/${revision}/tokenizer_config.json`]);
+  const probes: string[] = [];
+  const fake = fakeRuntime({ tokenizer: async model => {
+    // Transformers.js4.3.1 get_tokenizer_files probes metadata with default options {}.
+    const template = (fake.runtime.env.remotePathTemplate as string).replaceAll('{model}', model).replaceAll('{revision}', 'main');
+    const url = `${fake.runtime.env.remoteHost}${template}tokenizer_config.json`;
+    probes.push(url);
+    if (!cached.has(url)) throw new Error(`Offline cache miss: ${url}`);
+  } });
+  const original = fake.snapshot();
+  const adapter = embedding(fake, { revision, allowRemoteModels: false });
+  await adapter.preload();
+  assert.deepEqual(probes, [...cached]);
+  assert.deepEqual(fake.snapshot(), original);
+  await adapter.dispose();
+});
+
 test('provenance reports mutable/local revisions and snapshots cannot mutate adapter config', async () => {
   const fake = fakeRuntime();
   const input = transformersEmbedder({ model: 'test/model' });
@@ -431,6 +461,51 @@ test('progress observer failures do not change loading or inference results', as
   assert.equal(adapter.runtimeInfo().loaded, true);
   await adapter.encodeQuery('query', { onProgress: () => { throw undefined; } });
   assert.equal(fake.counts().pipelines, 1);
+  await adapter.dispose();
+});
+
+test('operation options are snapshotted so a caller cannot disable late abort checks', async () => {
+  const entered = gate(); const release = gate();
+  const fake = fakeRuntime({ output: async () => {
+    entered.open(); await release.promise;
+    return { type: 'float32', dims: [1, 2], data: new Float32Array([3, 4]) };
+  } });
+  const adapter = embedding(fake);
+  const controller = new AbortController();
+  const options = { signal: controller.signal as AbortSignal | undefined };
+  const pending = adapter.encodeQuery('query', options);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await entered.promise; options.signal = undefined;
+  controller.abort(); await rejected;
+  release.open(); await adapter.dispose();
+  assert.equal(adapter.runtimeInfo().dimension, null);
+});
+
+test('aborting model initialization releases late resources and a new call can retry', async () => {
+  const entered = gate(); const release = gate();
+  let attempt = 0;
+  const fake = fakeRuntime({ model: async () => { if (++attempt === 1) { entered.open(); await release.promise; } } });
+  const adapter = embedding(fake);
+  const controller = new AbortController();
+  const pending = adapter.preload({ signal: controller.signal });
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await entered.promise;
+  controller.abort(); await rejected;
+  const retry = adapter.preload(); release.open(); await retry;
+  assert.equal(fake.counts().disposed, 1);
+  assert.equal(fake.counts().pipelines, 1);
+  assert.equal(adapter.runtimeInfo().warmed, true);
+  await adapter.dispose();
+});
+
+test('tensor cleanup failures preserve successful output and invalid-output errors', async () => {
+  let invalid = false;
+  const fake = fakeRuntime({ output: () => ({ type: 'float32', dims: invalid ? [1, 1, 2] : [1, 2], data: new Float32Array([3, 4]), dispose: () => { throw new Error('cleanup failed'); } }) });
+  const adapter = embedding(fake);
+  assert.equal((await adapter.encodeQuery('valid')).length, 2);
+  invalid = true;
+  await assert.rejects(adapter.encodeQuery('invalid'), code('EMBEDDING_OUTPUT'));
+  assert.equal(adapter.runtimeInfo().warnings.filter(warning => warning.includes('release an inference output tensor')).length, 1);
   await adapter.dispose();
 });
 

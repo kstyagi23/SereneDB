@@ -23,6 +23,7 @@ interface IndexRow extends PersistedIndex {
 export interface EnsureCollectionOptions {
   explicit?: Partial<Record<'dimension' | 'metric' | 'embedding' | 'index', boolean>>;
   signal?: AbortSignal;
+  expectedGeneration?: string | null;
 }
 
 interface TransactionContext<T> {
@@ -301,6 +302,7 @@ export class Storage {
     validName(name, 'Collection name');
     const signal = options.signal;
     const fields = options.explicit === undefined ? undefined : { ...options.explicit };
+    const expectedGeneration = options.expectedGeneration;
     checkAbort(signal);
     if (!schema || !['cosine', 'dot', 'euclidean'].includes(schema.metric) || schema.dimension === undefined || !schema.index || (schema.embedding !== null && (!schema.embedding || !validEmbedding(schema.embedding.config)))) invalid('A complete, valid collection schema is required.');
     const normalized = collectionSchema({ dimension: schema.dimension ?? undefined, metric: schema.metric, index: schema.index, embedder: schema.embedding?.config });
@@ -311,12 +313,14 @@ export class Storage {
       context.watch(collections.get(name), value => {
         const now = Date.now();
         if (value === undefined) {
+          if (typeof expectedGeneration === 'string') throw new SereneDBError('Import destination was dropped after validation.', 'COLLECTION_STALE');
           const state: CollectionState = { name, generation: identifier(), schema: normalized, revision: 0, count: 0, createdAt: now, updatedAt: now };
           collections.add(state);
           context.done(state);
           return;
         }
         const state = stateFrom(value, name);
+        if (expectedGeneration === null || typeof expectedGeneration === 'string' && state.generation !== expectedGeneration) throw new SereneDBError('Import destination was replaced after validation.', 'COLLECTION_STALE');
         if ((explicit('metric') && normalized.metric !== state.schema.metric)
           || (explicit('embedding') && (normalized.embedding?.fingerprint ?? null) !== (state.schema.embedding?.fingerprint ?? null))
           || (explicit('index') && canonical(normalized.index) !== canonical(state.schema.index))
@@ -392,9 +396,11 @@ export class Storage {
     const now = Date.now();
     for (const input of mutation.upserts ?? []) {
       if (!input || typeof input !== 'object') invalid('Each upsert must be a prepared record.');
-      validName(input.id, 'Record ID');
-      if (!(input.vector instanceof Float32Array)) invalid('Prepared vectors must be Float32Array values.');
-      const vector = new Float32Array(input.vector);
+      const { id, vector: source, text, timestamp, metadata } = input;
+      validName(id, 'Record ID');
+      if (!(source instanceof Float32Array)) invalid('Prepared vectors must be Float32Array values.');
+      integer(source.length, 'Vector dimension', 1, 16384);
+      const vector = new Float32Array(source);
       integer(vector.length, 'Vector dimension', 1, 16384);
       if (dimension !== null && dimension !== vector.length) invalid('All vectors in a mutation must have the same dimension.', 'SCHEMA_MISMATCH');
       dimension = vector.length;
@@ -404,11 +410,11 @@ export class Storage {
         nonzero ||= value !== 0;
       }
       zeroVector ||= !nonzero;
-      if (input.text !== undefined && typeof input.text !== 'string') invalid('Record text must be a string.');
-      if (input.timestamp !== undefined && (typeof input.timestamp !== 'number' || !Number.isFinite(input.timestamp))) invalid('Record timestamp must be finite.');
-      upserts.set(input.id, {
-        collection: name, id: input.id, vector, metadata: prepareMetadata(input.metadata),
-        timestamp: input.timestamp ?? now, ...(input.text !== undefined ? { text: input.text } : {}),
+      if (text !== undefined && typeof text !== 'string') invalid('Record text must be a string.');
+      if (timestamp !== undefined && (typeof timestamp !== 'number' || !Number.isFinite(timestamp))) invalid('Record timestamp must be finite.');
+      upserts.set(id, {
+        collection: name, id, vector, metadata: prepareMetadata(metadata),
+        timestamp: timestamp ?? now, ...(text !== undefined ? { text } : {}),
       });
     }
     for (const id of mutation.deleteIds ?? []) { validName(id, 'Record ID'); deleteIds.add(id); }
@@ -437,13 +443,13 @@ export class Storage {
             if (state.schema.dimension === null && dimension !== null) state.schema.dimension = dimension;
             state.count = count;
             state.revision += 1;
-            state.updatedAt = now;
+            state.updatedAt = Math.max(state.updatedAt, Date.now());
             collections.put(state);
             context.store(INDEXES).delete(name);
           }
           context.done({ state, upserted: Array.from(upserts.values()), deleted });
         };
-        if (clear) { apply(); return; }
+        if (clear || state.count === 0) { apply(); return; }
         const ids = new Set([...deleteIds, ...upserts.keys()]);
         let pending = ids.size;
         if (pending === 0) { apply(); return; }
