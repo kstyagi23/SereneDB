@@ -62,6 +62,7 @@ export interface DocumentInput {
   vector?: Float32Array | Float64Array | number[];
   text?: string;
   metadata?: Metadata;
+  space?: string;
 }
 
 export interface StoredRecord {
@@ -107,6 +108,7 @@ export interface SearchOptions {
   includeVectors?: boolean;
   mmr?: number;
   signal?: AbortSignal;
+  space?: string;
 }
 
 export interface SearchResult {
