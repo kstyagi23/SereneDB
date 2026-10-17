@@ -8,7 +8,7 @@ import { Storage } from './storage.js';
 import { VectorIndex } from './vector-index.js';
 import { TransformersEmbedding, transformersEmbedder } from './transformers.js';
 import { canonical, collectionSchema, integer, prepareMetadata, prepareVector, validName } from './validation.js';
-import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, IndexMatch, OpenOptions, OperationOptions, PreparedRecord, SearchOptions, SearchResponse, SearchResult, StoredRecord } from './types.js';
+import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, IndexMatch, OpenOptions, OperationOptions, PreparedRecord, PreloadOptions, SearchOptions, SearchResponse, SearchResult, StoredRecord, TransformersConfig } from './types.js';
 
 type Header = Omit<StoredRecord, 'vector'>;
 interface WorkingSet {
@@ -24,6 +24,7 @@ const yieldTask = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 export class Engine {
   private entries = new Map<string, WorkingSet>();
   private models = new Map<string, TransformersEmbedding>();
+  private modelRuntime = new Map<string, TransformersConfig>();
   private queue: Promise<unknown> = Promise.resolve();
   private pending = 0;
   private closed = false;
@@ -133,7 +134,7 @@ export class Engine {
       this.models.delete(oldKey);
       try { await old.dispose(); } catch { /* A failed old cleanup must not corrupt collection state. */ }
     }
-    if (!model) { model = new TransformersEmbedding(schema.config); this.models.set(key, model); }
+    if (!model) { model = new TransformersEmbedding(this.modelRuntime.get(key) ?? schema.config); this.models.set(key, model); }
     this.models.delete(key); this.models.set(key, model);
     return model;
   }
@@ -356,11 +357,21 @@ export class Engine {
       case 'drop': {
         await this.storage.dropCollection(name, generation, options.signal);
         this.evict(name); this.clearScanner();
-        try { await this.models.get(generation)?.dispose(); } catch { /* The drop is already committed. */ } this.models.delete(generation);
+        try { await this.models.get(generation)?.dispose(); } catch { /* The drop is already committed. */ } this.models.delete(generation); this.modelRuntime.delete(generation);
         return;
       }
       case 'preload': {
         const entry = await this.working(name, generation, options, false);
+        const runtime = args[2] as PreloadOptions['runtime'];
+        if (runtime !== undefined) {
+          const schema = entry.state.schema.embedding;
+          if (!schema) invalid('This collection has no embedder.', 'NO_EMBEDDER');
+          if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime) || Object.keys(runtime).some(key => !['allowRemoteModels', 'device'].includes(key))) invalid('Preload runtime overrides support only device and allowRemoteModels.');
+          const config = transformersEmbedder({ ...(this.modelRuntime.get(generation) ?? schema.config), ...runtime });
+          const existing = this.models.get(generation);
+          this.modelRuntime.set(generation, config);
+          if (existing && canonical(existing.config) !== canonical(config)) { this.models.delete(generation); await existing.dispose(); }
+        }
         const model = await this.model(entry);
         await model.preload(options);
         return model.runtimeInfo();
@@ -371,7 +382,9 @@ export class Engine {
         const cached = this.entries.get(name);
         if (cached?.index && cached.graphReady && cached.state.revision === state.revision) { try { await this.storage.checkpoint(name, generation, state.revision, cached.index.exportSnapshot()); } catch { /* Unload never requires a snapshot write. */ } }
         this.evict(name); this.clearScanner();
-        await this.models.get(generation)?.dispose(); this.models.delete(generation);
+        const model = this.models.get(generation);
+        this.models.delete(generation); this.modelRuntime.delete(generation);
+        await model?.dispose();
         return;
       }
       case 'compact': {
@@ -404,7 +417,7 @@ export class Engine {
         for (const name of this.entries.keys()) this.evict(name);
         this.clearScanner();
         for (const model of this.models.values()) { try { await model.dispose(); } catch { /* Closed storage cannot be undone by resource cleanup. */ } }
-        this.models.clear(); return;
+        this.models.clear(); this.modelRuntime.clear(); return;
       }
       default: invalid(`Unknown database operation ${method}.`);
     }

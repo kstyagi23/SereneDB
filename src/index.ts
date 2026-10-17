@@ -1,7 +1,7 @@
 import { LocalConnection, WorkerConnection } from './rpc.js';
 import type { Connection } from './rpc.js';
 import { checkAbort, SereneDBError } from './errors.js';
-import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, Metadata, OpenOptions, OperationOptions, SearchOptions, SearchResponse, StoredRecord } from './types.js';
+import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, Metadata, OpenOptions, OperationOptions, PreloadOptions, SearchOptions, SearchResponse, StoredRecord } from './types.js';
 export type * from './types.js';
 export { SereneDBError } from './errors.js';
 export { chunkDocument } from './chunking.js';
@@ -67,7 +67,7 @@ export class Collection {
     if (batch.length) upserted += (await this.upsert(batch, options)).upserted;
     return { upserted };
   }
-  preload(options: OperationOptions = {}): Promise<unknown> { return this.call('preload', [], options); }
+  preload(options: PreloadOptions = {}): Promise<unknown> { return this.call('preload', [options.runtime === undefined ? undefined : structuredClone(options.runtime)], options); }
   checkpoint(options: OperationOptions = {}): Promise<boolean> { return this.call('checkpoint', [], options); }
   compact(options: OperationOptions = {}): Promise<unknown> { return this.call('compact', [], options); }
   stats(options: OperationOptions = {}): Promise<unknown> { return this.call('stats', [], options); }

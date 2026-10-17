@@ -134,6 +134,13 @@ export interface OperationOptions {
   onProgress?: (progress: ProgressEvent) => void;
 }
 
+export interface PreloadOptions extends OperationOptions {
+  runtime?: {
+    allowRemoteModels?: boolean;
+    device?: TransformersConfig['device'];
+  };
+}
+
 export interface ProgressEvent {
   phase: 'loading-model' | 'embedding' | 'indexing' | 'importing';
   completed: number;

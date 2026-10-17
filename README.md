@@ -10,7 +10,11 @@ npm run build
 npm run dev
 ```
 
-Open `http://127.0.0.1:4173`. The default demo is lexical and downloads no model. Semantic mode runs a pinned MiniLM ONNX model locally; document text is not sent to an embedding service.
+Open `http://127.0.0.1:4173`. The Search Studio starts with keyword retrieval and downloads no model. Semantic search is opt-in: load cached files or explicitly allow a Hugging Face download, then run embeddings locally. Documents and queries are not sent to an embedding service.
+
+The studio supports the pinned MiniLM preset or a custom public ONNX feature-extraction repository, with revision, weight dtype, pooling, prefixes, token limit, and CPU/WebGPU preference controls. Unloading releases memory but keeps downloaded files and vectors. Removing cached files affects only the selected model revision, with confirmation; stored collections and shared runtime assets remain intact. Model download permission is session-only and defaults off after reload.
+
+Documents can be pasted or imported from local text/Markdown files. Saves add content-addressed documents without duplicating identical text, saved counts stay separate from editor drafts, and different embedding configurations use separate collections. Search supports Enter submission, query suggestions, result highlighting, and explicit retrieval timing; clearing a collection requires confirmation.
 
 For the optional SIMD kernel, install Rust's `wasm32-unknown-unknown` target and run:
 
@@ -124,6 +128,7 @@ Supported metadata filters: equality, `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
 - `collection.compact()` rebuilds the graph and removes tombstones.
 - `collection.unload()` releases its working set/model; committed records remain intact.
 - `collection.preload()` loads and warms its embedding model/WASM assets.
+- `collection.preload({runtime: {allowRemoteModels, device}})` changes model-loading policy for this connection without modifying the stored embedding schema. `unload()` resets the override. Only download permission and device can be overridden; model, dtype, pooling, and other space-defining settings cannot.
 - `collection.drop()` invalidates existing handles via a new collection generation on recreation.
 - `db.export()` returns a versioned JSON-compatible backup from committed records; each collection is internally consistent, not a database-wide MVCC snapshot.
 - `db.import(export, {replace})` validates all input first, gates destination generations/schemas, then atomically replaces/upserts each collection's records. Creating a new collection precedes its record transaction; a database-wide import is not one transaction.

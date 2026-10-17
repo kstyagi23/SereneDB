@@ -36,3 +36,59 @@ test('real model embeddings, schema, cached assets, and offline worker restart',
   }, name);
   expect(offline).toBe('database'); expect(remote).toEqual([]);
 });
+
+test('studio download, semantic search, unload and cache-only reload preserve documents', async ({ page, context }) => {
+  test.setTimeout(300000);
+  await page.goto('/test.html');
+  await page.getByRole('radio', { name: 'Semantic search' }).check();
+  await expect(page.locator('#ingest')).toBeDisabled();
+  await page.getByLabel('Allow downloading model files from Hugging Face').check();
+  await page.getByRole('button', { name: 'Download & load model' }).click();
+  await expect(page.locator('#model-state')).toContainText('Ready on CPU / WASM', { timeout: 180000 });
+  await expect(page.locator('#model-state')).toContainText('384 dimensions');
+  await page.getByRole('button', { name: 'Save documents' }).click();
+  await expect(page.locator('#status')).toContainText('Committed 4 documents');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+  await page.evaluate(async () => {
+    const { Collection } = await import('/dist/index.js');
+    const original = Collection.prototype.unload;
+    Collection.prototype.unload = async function () { Collection.prototype.unload = original; throw new Error('Injected unload failure'); };
+  });
+  await page.getByLabel('Allow downloading model files from Hugging Face').uncheck();
+  await expect(page.locator('#status')).toContainText('Injected unload failure');
+  await expect(page.locator('#search')).toBeDisabled();
+  await expect(page.locator('#ingest')).toBeDisabled();
+  await page.getByRole('button', { name: 'Unload from memory' }).click();
+  await expect(page.locator('#status')).toContainText('Cached files and saved documents are kept');
+  await expect(page.locator('#collection-count')).toHaveText('4 saved documents');
+  await expect(page.locator('#search')).toBeDisabled();
+  await page.getByLabel('Allow downloading model files from Hugging Face').uncheck();
+  const remote: string[] = [];
+  await context.route('**/*', async route => {
+    const url = route.request().url();
+    if (!url.startsWith('http://127.0.0.1:4173')) { remote.push(url); await route.abort(); }
+    else await route.continue();
+  });
+  await page.getByRole('button', { name: 'Load cached model' }).click();
+  await expect(page.locator('#model-state')).toContainText('Ready on CPU / WASM', { timeout: 60000 });
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+  await page.reload();
+  await page.getByRole('radio', { name: 'Semantic search' }).check();
+  await expect(page.locator('#collection-count')).toHaveText('4 saved documents');
+  await expect(page.getByLabel('Allow downloading model files from Hugging Face')).not.toBeChecked();
+  await page.getByRole('button', { name: 'Load cached model' }).click();
+  await expect(page.locator('#model-state')).toContainText('Ready on CPU / WASM', { timeout: 60000 });
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+  await page.getByLabel('Embedding model').selectOption('custom');
+  await page.getByLabel('Hugging Face repository').fill('https://huggingface.co/Xenova/all-MiniLM-L6-v2');
+  await page.getByLabel('Revision', { exact: true }).fill('751bff37182d3f1213fa05d7196b954e230abad9');
+  await expect(page.locator('#collection-count')).toHaveText('4 saved documents');
+  await page.getByRole('button', { name: 'Load cached model' }).click();
+  await expect(page.locator('#model-state')).toContainText('Ready on CPU / WASM', { timeout: 60000 });
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+  expect(remote).toEqual([]);
+});

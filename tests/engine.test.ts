@@ -266,6 +266,45 @@ test('model residency waits for native disposal before loading a replacement', a
   } finally { TransformersEmbedding.prototype.preload = preload; TransformersEmbedding.prototype.dispose = dispose; }
 });
 
+test('preload runtime permission and device overrides are session-only and preserve embedding schema', async () => {
+  const { TransformersEmbedding, transformersEmbedder } = await import('../src/transformers.js');
+  const preload = TransformersEmbedding.prototype.preload;
+  const seen: Array<{ remote: boolean; device: string }> = [];
+  TransformersEmbedding.prototype.preload = async function () { seen.push({ remote: this.config.allowRemoteModels, device: this.config.device }); };
+  const db = await fresh();
+  try {
+    const config = transformersEmbedder({ model: 'test/model', allowRemoteModels: false });
+    const docs = await db.collection('docs', { embedder: config });
+    const before = await docs.state();
+    await docs.preload({ runtime: { allowRemoteModels: true, device: 'auto' } });
+    await docs.preload();
+    await docs.preload({ runtime: { allowRemoteModels: false } });
+    assert.deepEqual(seen, [{ remote: true, device: 'auto' }, { remote: true, device: 'auto' }, { remote: false, device: 'auto' }]);
+    assert.deepEqual(await docs.state(), before);
+    await assert.rejects(docs.preload({ runtime: { pooling: 'cls' } as never }));
+    await assert.rejects(docs.preload({ runtime: { allowRemoteModels: 'yes' } as never }));
+    await docs.unload(); await docs.preload();
+    assert.deepEqual(seen.at(-1), { remote: false, device: 'wasm' });
+  } finally { await db.destroy(); TransformersEmbedding.prototype.preload = preload; }
+});
+
+test('unload revokes session policy even if native model disposal fails', async () => {
+  const { TransformersEmbedding, transformersEmbedder } = await import('../src/transformers.js');
+  const preload = TransformersEmbedding.prototype.preload, dispose = TransformersEmbedding.prototype.dispose;
+  const seen: boolean[] = [];
+  let fail = true;
+  TransformersEmbedding.prototype.preload = async function () { seen.push(this.config.allowRemoteModels); };
+  TransformersEmbedding.prototype.dispose = async function () { if (fail) { fail = false; throw new Error('Injected native disposal failure'); } };
+  const db = await fresh();
+  try {
+    const docs = await db.collection('docs', { embedder: transformersEmbedder({ model: 'test/model', allowRemoteModels: false }) });
+    await docs.preload({ runtime: { allowRemoteModels: true } });
+    await assert.rejects(docs.unload());
+    await docs.preload();
+    assert.deepEqual(seen, [true, false]);
+  } finally { await db.destroy(); TransformersEmbedding.prototype.preload = preload; TransformersEmbedding.prototype.dispose = dispose; }
+});
+
 test('legacy migration is explicit and does not touch the source', async () => {
   const { migrateLegacy } = await import('../src/legacy.js');
   const source = `legacy-${crypto.randomUUID()}`, target = `target-${crypto.randomUUID()}`;

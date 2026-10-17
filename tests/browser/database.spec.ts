@@ -206,7 +206,7 @@ test('unresponsive workers reject bounded operations instead of hanging forever'
 });
 
 test('browser demo ingests and retrieves without external downloads', async ({ page }) => {
-  await page.getByRole('button', { name: 'Open & Ingest' }).click();
+  await page.getByRole('button', { name: 'Save documents' }).click();
   await expect(page.locator('#status')).toContainText('Committed');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(page.locator('.result').first()).toContainText('IndexedDB');
@@ -215,8 +215,8 @@ test('browser demo ingests and retrieves without external downloads', async ({ p
 test('browser demo remains usable without horizontal overflow on mobile widths', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await expect(page.getByRole('button', { name: 'Open & Ingest' })).toBeVisible();
-  await page.getByRole('button', { name: 'Open & Ingest' }).click();
+  await expect(page.getByRole('button', { name: 'Save documents' })).toBeVisible();
+  await page.getByRole('button', { name: 'Save documents' }).click();
   await expect(page.locator('#status')).toContainText('Committed');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await expect(page.locator('.result').first()).toContainText('IndexedDB');

@@ -3,69 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SereneDB | Local Retrieval Lab</title>
-  <style>
-    :root { color-scheme: dark; --paper:#111817; --panel:#192321; --line:#34433e; --ink:#e5ece3; --muted:#a5b4aa; --accent:#c8ee92; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.6 ui-sans-serif,system-ui,sans-serif; }
-    main { max-width:1150px; margin:auto; padding:40px 28px 70px; }
-    header { border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:20px; padding-bottom:18px; }
-    .brand { font-weight:800; letter-spacing:-1px; font-size:25px; }
-    .tag { color:var(--accent); font:12px ui-monospace,monospace; text-transform:uppercase; letter-spacing:2px; }
-    h1 { font-size:clamp(40px,7vw,76px); line-height:1.05; letter-spacing:-3px; max-width:800px; margin:55px 0 22px; }
-    h1 span { color:var(--accent); }
-    .intro { max-width:700px; color:var(--muted); font-size:19px; }
-    .layout { display:grid; grid-template-columns:1.2fr 1fr; gap:24px; margin-top:35px; }
-    section { border:1px solid var(--line); background:var(--panel); padding:25px; border-radius:5px; }
-    h2 { font-size:15px; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 20px; }
-    label { display:block; color:var(--muted); font-size:13px; margin:15px 0 7px; }
-    input,textarea,select { background:var(--paper); border:1px solid var(--line); color:var(--ink); padding:12px; width:100%; font:inherit; border-radius:3px; }
-    textarea { resize:vertical; min-height:145px; }
-    button { background:var(--accent); border:0; color:#142318; padding:11px 18px; font:700 14px/1.5 inherit; cursor:pointer; border-radius:3px; }
-    button.secondary { color:var(--ink); background:transparent; border:1px solid var(--line); }
-    button:disabled { opacity:.5; cursor:wait; }
-    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:17px; }
-    .status { font:13px/1.7 ui-monospace,monospace; color:var(--muted); white-space:pre-wrap; margin-top:20px; }
-    .result { border-top:1px solid var(--line); padding:16px 0; }
-    .result strong { color:var(--accent); font:13px ui-monospace,monospace; }
-    .result p { margin:6px 0 0; }
-    #results:empty::after { content:'Search results appear here. Your documents stay in this browser.'; color:var(--muted); }
-    footer { color:var(--muted); margin-top:30px; font-size:13px; }
-    a { color:var(--accent); }
-    @media(max-width:780px) { .layout { grid-template-columns:1fr; } main { padding:25px 18px; } h1 { letter-spacing:-2px; } header { align-items:flex-start; } }
-  </style>
+  <meta name="theme-color" content="#111817">
+  <title>SereneDB | Local Search Studio</title>
+  <link rel="stylesheet" href="./demo.css">
 </head>
 <body>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
 <main>
-  <header><div class="brand">SereneDB<span style="color:var(--accent)">.</span></div><div class="tag">Browser-Native / Local-First</div></header>
-  <h1>Your knowledge.<br><span>Your browser.</span></h1>
-  <p class="intro">A transactional vector database with real HNSW, optional SIMD, and on-device embeddings. No database server. No document uploads.</p>
-  <div class="layout">
-    <section>
-      <h2>01 / Build a Collection</h2>
-      <label for="mode">Embedding Mode</label>
-      <select id="mode"><option value="lexical">Instant lexical demo (no model download)</option><option value="semantic">Semantic MiniLM (downloads model weights)</option></select>
-      <label for="documents">Documents (one paragraph per document)</label>
-      <textarea id="documents">IndexedDB stores structured data persistently inside your browser.
+  <header class="topbar">
+    <a class="brand" href="./test.html" aria-label="SereneDB home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>SereneDB<span class="brand-dot">.</span></a>
+    <div class="topbar-right"><span class="local-badge"><span class="status-dot" aria-hidden="true"></span>Runs on your device</span><span class="version">SEARCH STUDIO / 02</span></div>
+  </header>
+
+  <div class="intro">
+    <div><p class="eyebrow">A little less cloud. A lot more control.</p><h1>Find the meaning.<br><span>Keep the data.</span></h1><p class="intro-copy">Turn your documents into a searchable collection. Start instantly with keywords, or bring an embedding model into your browser.</p></div>
+    <aside class="privacy-note"><span class="note-line"></span><strong>Private by design.</strong><p>Documents and queries stay on this device. Hugging Face receives model-file requests only when you choose to download.</p></aside>
+  </div>
+
+  <section class="model-panel" aria-labelledby="setup-title">
+    <div class="section-heading"><div><p class="eyebrow">01 / Choose your engine</p><h2 id="setup-title">How do you want to search?</h2></div><span id="engine-badge" class="badge">No model needed</span></div>
+    <fieldset class="mode-options"><legend class="sr-only">Search engine</legend>
+      <label class="mode-card"><input type="radio" name="mode" value="lexical" checked><span class="mode-copy"><strong>Keyword search</strong><span>Instant BM25 retrieval. No model download.</span></span><span class="mode-marker" aria-hidden="true"></span></label>
+      <label class="mode-card"><input type="radio" name="mode" value="semantic"><span class="mode-copy"><strong>Semantic search</strong><span>Search by meaning with a local ONNX model.</span></span><span class="mode-marker" aria-hidden="true"></span></label>
+    </fieldset>
+
+    <div id="model-settings" hidden>
+      <div class="model-config-row">
+        <div class="field"><label for="model-preset">Embedding model</label><select id="model-preset"><option value="minilm">MiniLM L6 / compact &amp; fast</option><option value="custom">Custom Hugging Face model</option></select></div>
+        <div class="field"><label for="device">Run on</label><select id="device"><option value="wasm">CPU / WebAssembly</option><option value="auto">Prefer WebGPU / CPU fallback</option></select></div>
+        <div class="model-summary"><span id="model-size">~23 MB weights</span><span id="model-shape">384 dimensions</span></div>
+      </div>
+      <div id="custom-model-fields" class="custom-fields" hidden>
+        <div class="field"><label for="model-id">Hugging Face repository</label><input id="model-id" value="Xenova/all-MiniLM-L6-v2" placeholder="organization/model-name" spellcheck="false" autocomplete="off" aria-describedby="model-help"></div>
+        <div class="field"><label for="model-revision">Revision</label><input id="model-revision" value="main" placeholder="Commit SHA, branch, or tag" spellcheck="false" autocomplete="off"></div>
+      </div>
+      <details id="model-advanced" class="advanced"><summary>Advanced embedding settings</summary><div class="advanced-fields">
+        <div class="field"><label for="model-dtype">ONNX weights</label><select id="model-dtype"><option value="q8">q8 / quantized</option><option value="fp32">fp32 / full precision</option><option value="fp16">fp16 / half precision</option><option value="q4">q4 / 4-bit</option><option value="q4f16">q4f16</option></select></div>
+        <div class="field"><label for="model-pooling">Pooling</label><select id="model-pooling"><option value="mean">Mean</option><option value="cls">CLS</option><option value="last_token">Last token</option></select></div>
+        <div class="field"><label for="model-tokens">Maximum tokens</label><input id="model-tokens" type="number" value="512" min="1" max="32768" step="1"></div>
+        <label class="checkbox-field"><input id="model-normalize" type="checkbox" checked>Normalize embeddings</label>
+        <div class="field"><label for="query-prefix">Query prefix</label><input id="query-prefix" value="" placeholder="e.g. query: " spellcheck="false"></div>
+        <div class="field"><label for="document-prefix">Document prefix</label><input id="document-prefix" value="" placeholder="e.g. passage: " spellcheck="false"></div>
+      </div></details>
+      <p id="model-help" class="help">Use a public ONNX feature-extraction model supported by Transformers.js. Its repository must contain the selected weights; pooling and prefixes must match its model card. Pin a commit SHA for reproducible embeddings.</p>
+      <div class="download-consent"><label class="checkbox-field"><input id="download-consent" type="checkbox">Allow downloading model files from Hugging Face</label><p>Optional. Leave this off to load an already cached model without remote model access. The local ONNX runtime may add ~28 MB on first use.</p></div>
+      <div class="model-toolbar"><div class="actions"><button id="load-model" type="button">Load cached model</button><button id="unload-model" type="button" class="secondary" disabled>Unload from memory</button><button id="remove-model" type="button" class="text-button" disabled>Remove cached files</button></div><a id="model-link" href="https://huggingface.co/Xenova/all-MiniLM-L6-v2" target="_blank" rel="noopener noreferrer">View model card <span aria-hidden="true">&#8599;</span></a></div>
+      <div class="model-state-line"><span id="model-state" role="status" aria-live="polite">Not loaded. Downloads are off.</span><span id="cache-state">Checking local cache...</span></div>
+    </div>
+  </section>
+
+  <div id="workspace" class="workspace">
+    <section class="documents-panel" aria-labelledby="documents-title">
+      <div class="section-heading"><div><p class="eyebrow">02 / Add your knowledge</p><h2 id="documents-title">Documents</h2></div><button id="sample" type="button" class="text-button">Use sample</button></div>
+      <label for="documents" class="sr-only">Documents, separated by a blank line</label>
+      <textarea id="documents" spellcheck="false" aria-describedby="documents-help">IndexedDB stores structured data persistently inside your browser.
 
 HNSW builds a graph for fast approximate nearest-neighbor retrieval.
 
 Transformers.js runs ONNX embedding models locally using WebAssembly or WebGPU.
 
 Sourdough bread needs flour, water, salt, and a living starter.</textarea>
-      <div class="actions"><button id="ingest">Open &amp; Ingest</button><button id="reset" class="secondary">Clear Collection</button></div>
-      <div id="status" class="status" role="status" aria-live="polite">Database not opened. Choose a mode and ingest documents.</div>
+      <div class="editor-footer"><p id="documents-help">Separate documents with a blank line.</p><span id="draft-count">4 documents</span></div>
+      <div class="document-actions"><button id="ingest" type="button">Save documents <span aria-hidden="true">&#8594;</span></button><div><button id="import-text" type="button" class="secondary">Import text</button><input id="text-file" type="file" accept=".txt,.md,text/plain,text/markdown" hidden></div></div>
+      <p id="save-help" class="help">New documents are added in one transaction. Identical text is saved only once; existing documents are kept.</p>
+      <div class="collection-footer"><span class="collection-label"><span class="status-dot" aria-hidden="true"></span><span id="collection-count">0 saved documents</span></span><button id="reset" type="button" class="text-button" disabled>Clear collection</button></div>
     </section>
-    <section>
-      <h2>02 / Retrieve</h2>
-      <label for="query">Search Query</label><input id="query" value="persistent data in the browser">
-      <label for="retrieval">Retrieval Strategy</label><select id="retrieval"><option value="hybrid">Hybrid: vector + BM25</option><option value="auto">Vector: automatic HNSW / exact</option><option value="exact">Vector: exact reference</option></select>
-      <div class="actions"><button id="search">Search</button><button id="export" class="secondary">Export Backup</button></div>
-      <div id="results" style="margin-top:25px" aria-live="polite"></div>
+
+    <section class="search-panel" aria-labelledby="search-title">
+      <div class="section-heading"><div><p class="eyebrow">03 / Ask something</p><h2 id="search-title">Search your collection</h2></div><span id="search-mode-label" class="badge">Keyword</span></div>
+      <form id="search-form"><label for="query" class="sr-only">Search query</label><div class="query-row"><input id="query" value="persistent data in the browser" placeholder="What are you looking for?" autocomplete="off" required><button id="search" type="submit">Search</button></div>
+        <div class="search-options"><div class="field"><label for="retrieval">Strategy</label><select id="retrieval" disabled><option value="hybrid">Keyword / BM25</option></select></div><div class="field top-k"><label for="top-k">Results</label><select id="top-k"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select></div></div>
+      </form>
+      <div class="suggestions" aria-label="Sample queries"><button type="button" data-query="persistent data in the browser">Browser storage</button><button type="button" data-query="local ONNX embedding models">Local models</button><button type="button" data-query="sourdough bread">Something else</button></div>
+      <div class="results-heading"><h3>Results</h3><span id="search-metrics">Ready when you are</span></div>
+      <div id="results" aria-live="polite" aria-busy="false"><div class="empty-state"><span class="empty-mark" aria-hidden="true">&#8981;</span><strong>A good answer starts here.</strong><p>Save a few documents, then search. Everything stays in this browser.</p></div></div>
     </section>
   </div>
-  <footer>IndexedDB is authoritative; indexes are rebuildable. Model assets are fetched only in semantic mode. Browser storage remains subject to quotas and user deletion.</footer>
+
+  <section class="activity-panel" aria-label="Operation status"><span id="activity-indicator" class="activity-indicator" aria-hidden="true"></span><div class="activity-copy"><p id="status" role="status" aria-live="polite" aria-atomic="true">Ready. Start with the sample documents or add your own.</p><div id="operation-progress" hidden><progress id="progress-bar" max="1" aria-label="Operation progress"></progress><span id="progress-label"></span></div></div><button id="cancel" type="button" class="secondary" hidden>Cancel</button></section>
+  <footer><p>IndexedDB persistence. Worker-based execution. No database server.</p><div><span id="storage-status">Local storage</span><button id="export" type="button" class="text-button" disabled>Export backup</button></div></footer>
 </main>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><p class="eyebrow">You are in control</p><h2 id="confirm-title">Clear this collection?</h2><p id="confirm-description"></p><div class="actions"><button value="cancel" class="secondary">Keep it</button><button id="confirm-action" value="confirm" class="danger">Clear collection</button></div></form></dialog>
 <script type="module" src="./demo.js"></script>
 </body>
 </html>
