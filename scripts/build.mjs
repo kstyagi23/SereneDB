@@ -6,7 +6,7 @@ await mkdir('dist', { recursive: true });
 const types = spawnSync('node', ['node_modules/typescript/bin/tsc', '--emitDeclarationOnly'], { stdio: 'inherit' });
 if (types.status !== 0) process.exit(types.status ?? 1);
 await build({
-  entryPoints: ['src/index.ts', 'src/local.ts', 'src/worker.ts', 'src/transformers.ts'],
+  entryPoints: ['src/index.ts', 'src/local.ts', 'src/worker.ts', 'src/transformers.ts', 'src/legacy.ts'],
   outdir: 'dist', bundle: true, format: 'esm', splitting: true, sourcemap: true,
   target: ['es2022'], platform: 'browser', external: ['@huggingface/transformers'],
   plugins: [{ name: 'optional-browser-model-runtime', setup(build) {

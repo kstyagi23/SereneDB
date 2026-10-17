@@ -9,7 +9,8 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./local": { "types": "./dist/local.d.ts", "import": "./dist/local.js" },
-    "./transformers": { "types": "./dist/transformers.d.ts", "import": "./dist/transformers.js" }
+    "./transformers": { "types": "./dist/transformers.d.ts", "import": "./dist/transformers.js" },
+    "./legacy": { "types": "./dist/legacy.d.ts", "import": "./dist/legacy.js" }
   },
   "files": ["dist", "LICENSE", "README.md"],
   "scripts": {
