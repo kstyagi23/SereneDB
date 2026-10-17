@@ -34,13 +34,13 @@ export class SIMDScanner {
     if (this.owner === owner) return;
     this.clear();
     this.bytes = count * dimension * 4;
+    this.count = count;
+    this.dimension = dimension;
     this.matrix = this.kernel.allocate(this.bytes);
     this.query = this.kernel.allocate(dimension * 4);
     this.output = this.kernel.allocate(count * 4);
     if (!this.matrix || !this.query || !this.output) { this.clear(); throw new Error('WebAssembly memory allocation failed.'); }
     new Float32Array(this.kernel.memory.buffer, this.matrix, count * dimension).set(vectors.subarray(0, count * dimension));
-    this.count = count;
-    this.dimension = dimension;
     this.owner = owner;
   }
 

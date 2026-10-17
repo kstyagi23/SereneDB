@@ -285,7 +285,7 @@ export class Engine {
       }
       case 'drop': {
         await this.working(name, generation, options);
-        await this.storage.dropCollection(name);
+        await this.storage.dropCollection(name, generation, options.signal);
         this.entries.delete(name); this.scanner?.clear();
         await this.models.get(generation)?.dispose(); this.models.delete(generation);
         return;
