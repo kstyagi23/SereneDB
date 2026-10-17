@@ -179,6 +179,47 @@ test('mutations acknowledge transaction completion, not request success', async 
   } finally { IDBObjectStore.prototype.put = original; }
 });
 
+test('cancellation at the transaction completion boundary cannot reject an already committed mutation', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', schema());
+  const original = IDBDatabase.prototype.transaction;
+  const controller = new AbortController();
+  IDBDatabase.prototype.transaction = function (...args: any[]): IDBTransaction {
+    const tx = Reflect.apply(original, this, args);
+    if (args[1] === 'readwrite') tx.addEventListener('complete', () => { controller.abort(); db.close(); }, { once: true });
+    return tx;
+  };
+  let result;
+  try { result = await db.mutate('docs', { upserts: [record('a')] }, undefined, controller.signal); }
+  finally { IDBDatabase.prototype.transaction = original; }
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(result.state.count, 1);
+  const reopened = await Storage.open(db.name);
+  t.after(() => reopened.close());
+  assert.equal((await reopened.refreshState('docs')).count, 1);
+  assert.ok(await reopened.get('docs', 'a'));
+});
+
+test('failed IDB requests abort even when a request listener suppresses the default abort', async t => {
+  const db = await storage(t);
+  await db.ensureCollection('docs', schema());
+  const original = IDBObjectStore.prototype.put;
+  let failed = false;
+  IDBObjectStore.prototype.put = function (value: any, key?: IDBValidKey): IDBRequest<IDBValidKey> {
+    if (this.name === 'records' && value.id === 'bad') {
+      const request = this.add({ ...value, id: 'first' });
+      request.addEventListener('error', event => { failed = true; event.preventDefault(); });
+      return request;
+    }
+    return Reflect.apply(original, this, key === undefined ? [value] : [value, key]);
+  };
+  try { await assert.rejects(db.mutate('docs', { upserts: [record('first'), record('bad')] }), { name: 'ConstraintError' }); }
+  finally { IDBObjectStore.prototype.put = original; }
+  assert.equal(failed, true);
+  assert.deepEqual((await db.readCollection('docs')).records, []);
+  assert.equal((await db.refreshState('docs')).schema.dimension, null);
+});
+
 test('AbortSignal aborts an active transaction even after a record request succeeds', async t => {
   const db = await storage(t);
   await db.ensureCollection('docs', schema());

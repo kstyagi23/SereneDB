@@ -24,6 +24,7 @@ export class Engine {
   private queue: Promise<unknown> = Promise.resolve();
   private pending = 0;
   private closed = false;
+  private readonly maxResidentCollections = 2;
   private constructor(private storage: Storage, private scanner: SIMDScanner | null) {}
 
   static async open(name: string, options: OpenOptions = {}): Promise<Engine> {
@@ -48,12 +49,12 @@ export class Engine {
 
   private async working(name: string, generation?: string, options: OperationOptions = {}): Promise<WorkingSet> {
     validName(name, 'Collection name');
-    const state = await this.storage.refreshState(name);
+    const state = await this.storage.refreshState(name, options.signal);
     if (generation && state.generation !== generation) throw new SereneDBError('Collection was dropped or replaced. Open a new collection handle.', 'STALE_HANDLE');
     const cached = this.entries.get(name);
-    if (cached && cached.state.generation === state.generation && cached.state.revision === state.revision) return cached;
+    if (cached && cached.state.generation === state.generation && cached.state.revision === state.revision) { this.entries.delete(name); this.entries.set(name, cached); return cached; }
     checkAbort(options.signal);
-    const snapshot = await this.storage.readCollection(name);
+    const snapshot = await this.storage.readCollection(name, options.signal);
     if (generation && snapshot.state.generation !== generation) throw new SereneDBError('Collection was replaced.', 'STALE_HANDLE');
     const records = new Map<string, Header>();
     const lexical = new LexicalIndex();
@@ -62,12 +63,16 @@ export class Engine {
       records.set(record.id, header);
       lexical.add(record);
     }
+    if (this.scanner) this.scanner.clear();
     let index: VectorIndex | null = null;
     if (snapshot.state.schema.dimension !== null) {
       if (snapshot.snapshot?.generation === snapshot.state.generation && snapshot.snapshot.revision === snapshot.state.revision) {
         try {
           index = VectorIndex.fromSnapshot(snapshot.snapshot.payload);
-          if (index.size !== records.size || index.dimension !== snapshot.state.schema.dimension || snapshot.records.some(record => !index!.has(record.id))) index = null;
+          if (index.size !== records.size || index.dimension !== snapshot.state.schema.dimension || snapshot.snapshot.payload.metric !== snapshot.state.schema.metric || snapshot.records.some(record => {
+            const indexed = index!.get(record.id);
+            return !indexed || indexed.some((value, i) => value !== record.vector[i]);
+          })) index = null;
         } catch { index = null; }
       }
       if (!index) {
@@ -86,7 +91,13 @@ export class Engine {
     }
     checkAbort(options.signal);
     const entry = { state: snapshot.state, records, index, lexical };
+    this.entries.delete(name);
     this.entries.set(name, entry);
+    while (this.entries.size > this.maxResidentCollections) {
+      const [oldName, old] = this.entries.entries().next().value!;
+      if (old.index) { try { await this.storage.checkpoint(oldName, old.state.generation, old.state.revision, old.index.exportSnapshot()); } catch { /* Eviction must not depend on a derived checkpoint. */ } }
+      this.entries.delete(oldName);
+    }
     this.scanner?.clear();
     return entry;
   }
@@ -113,11 +124,14 @@ export class Engine {
     const raw: PreparedRecord[] = [];
     const texts: string[] = [], positions: number[] = [];
     let dimension = entry.state.schema.dimension;
+    let payloadBytes = 0;
     for (const item of inputs) {
       if (!item || typeof item !== 'object') invalid('Document must be an object.');
       validName(item.id, 'Document ID');
       if (item.text !== undefined && (typeof item.text !== 'string' || item.text.length > 2000000)) invalid('Document text must be a string of at most 2 million characters.');
       const metadata = prepareMetadata(item.metadata);
+      payloadBytes += (item.text?.length ?? 0) * 2 + JSON.stringify(metadata).length * 2 + ((item.vector?.length ?? dimension ?? 384) * 4);
+      if (payloadBytes > 64 * 1024 * 1024) invalid('Atomic batch exceeds the 64 MiB input budget. Use collection.ingest() for bounded streaming batches.', 'BATCH_TOO_LARGE');
       if (item.vector !== undefined) {
         if (entry.state.schema.embedding && item.space !== entry.state.schema.embedding.fingerprint) invalid('Raw vectors in an embedding collection require its exact space fingerprint.', 'SCHEMA_MISMATCH');
         const vector = prepareVector(item.vector, entry.state.schema.metric, dimension);
@@ -257,11 +271,15 @@ export class Engine {
         return this.storage.ensureCollection(name, collectionSchema(normalized), { explicit: { dimension: supplied.dimension !== undefined, metric: supplied.metric !== undefined, embedding: supplied.embedder !== undefined, index: supplied.index !== undefined }, signal: options.signal });
       }
       case 'list': return this.storage.listCollections();
-      case 'state': return structuredClone((await this.working(name, generation, options)).state);
+      case 'state': {
+        const state = await this.storage.refreshState(name, options.signal);
+        if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
+        return state;
+      }
       case 'upsert': return this.upsert(name, generation, args[2] as DocumentInput[], options);
       case 'get': {
         validName(args[2], 'Document ID');
-        return this.materialize(await this.working(name, generation, options), args[2] as string);
+        return await this.storage.get(name, args[2] as string, options.signal, generation) ?? null;
       }
       case 'scan': {
         const input = (args[2] ?? {}) as { offset?: number; limit?: number; includeVectors?: boolean; filter?: SearchOptions['filter'] };
@@ -275,16 +293,19 @@ export class Engine {
       }
       case 'search': return this.search(name, generation, args[2] as SearchOptions, options);
       case 'delete': case 'clear': {
-        await this.working(name, generation, options);
         const ids = method === 'delete' ? args[2] as string[] : [];
         if (!Array.isArray(ids)) invalid('IDs must be an array.');
         ids.forEach(id => validName(id, 'Document ID'));
+        const cached = this.entries.get(name);
         const result = await this.storage.mutate(name, method === 'clear' ? { clear: true } : { deleteIds: ids }, generation, options.signal);
-        this.entries.delete(name); this.scanner?.clear();
+        this.scanner?.clear();
+        if (method === 'delete' && cached?.state.generation === generation && result.state.revision === cached.state.revision + 1) {
+          for (const id of ids) { cached.records.delete(id); cached.index?.remove(id); cached.lexical.remove(id); }
+          cached.state = result.state;
+        } else if (method === 'clear' || cached?.state.revision !== result.state.revision) this.entries.delete(name);
         return { deleted: result.deleted, count: result.state.count, revision: result.state.revision };
       }
       case 'drop': {
-        await this.working(name, generation, options);
         await this.storage.dropCollection(name, generation, options.signal);
         this.entries.delete(name); this.scanner?.clear();
         await this.models.get(generation)?.dispose(); this.models.delete(generation);
@@ -296,7 +317,10 @@ export class Engine {
         return this.model(entry).runtimeInfo();
       }
       case 'unload': {
-        await this.working(name, generation, options);
+        const state = await this.storage.refreshState(name, options.signal);
+        if (state.generation !== generation) throw new SereneDBError('Collection handle is stale.', 'STALE_HANDLE');
+        const cached = this.entries.get(name);
+        if (cached?.index && cached.state.revision === state.revision) { try { await this.storage.checkpoint(name, generation, state.revision, cached.index.exportSnapshot()); } catch { /* Unload never requires a snapshot write. */ } }
         this.entries.delete(name); this.scanner?.clear();
         await this.models.get(generation)?.dispose(); this.models.delete(generation);
         return;

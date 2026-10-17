@@ -111,6 +111,68 @@ test('checkpoint corruption rebuilds from committed records', async ({ page }) =
   expect(result).toEqual(['a', 'b']);
 });
 
+test('successful writes are committed before acknowledgement and clone failures roll back', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { Storage } = await import('/dist/local.js');
+    const { collectionSchema } = await import('/dist/local.js').then(async () => {
+      // The public collection API creates the schema; Storage exercises native transaction hooks.
+      const db = await window.SereneDB.open(`schema-${crypto.randomUUID()}`, { worker: false });
+      const docs = await db.collection('docs', { dimension: 2 }); const state = await docs.state(); await db.destroy();
+      return { collectionSchema: () => state.schema };
+    });
+    const storage = await Storage.open(`commit-${crypto.randomUUID()}`);
+    const state = await storage.ensureCollection('docs', collectionSchema());
+    const original = IDBDatabase.prototype.transaction;
+    let completed = false;
+    IDBDatabase.prototype.transaction = function (...args) {
+      const tx = original.apply(this, args);
+      if (args[1] === 'readwrite') tx.addEventListener('complete', () => { completed = true; });
+      return tx;
+    };
+    try { await storage.mutate('docs', { upserts: [{ id: 'a', vector: new Float32Array([1, 0]), metadata: {} }] }, state.generation); }
+    finally { IDBDatabase.prototype.transaction = original; }
+    const committedAtAcknowledgement = completed;
+    const put = IDBObjectStore.prototype.put;
+    let puts = 0, rejected = false;
+    IDBObjectStore.prototype.put = function (...args) {
+      if (this.name === 'records' && ++puts === 2) throw new DOMException('Injected clone failure', 'DataCloneError');
+      return put.apply(this, args);
+    };
+    try { await storage.mutate('docs', { upserts: [{ id: 'b', vector: new Float32Array([1, 0]), metadata: {} }, { id: 'c', vector: new Float32Array([0, 1]), metadata: {} }] }); }
+    catch { rejected = true; }
+    finally { IDBObjectStore.prototype.put = put; }
+    const snapshot = await storage.readCollection('docs'); await storage.destroy();
+    return { committedAtAcknowledgement, rejected, ids: snapshot.records.map(record => record.id), count: snapshot.state.count };
+  });
+  expect(result).toEqual({ committedAtAcknowledgement: true, rejected: true, ids: ['a'], count: 1 });
+});
+
+test('worker loss recovers committed rows without an index checkpoint', async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const name = `worker-loss-${crypto.randomUUID()}`;
+    const worker = new Worker('/dist/worker.js', { type: 'module' });
+    let sequence = 0;
+    const requests = new Map<number, (value: unknown) => void>();
+    worker.onmessage = event => { if ('result' in event.data) { requests.get(event.data.id)?.(event.data.result); requests.delete(event.data.id); } };
+    const call = (method: string, args: unknown[]) => new Promise<any>(resolve => { const id = ++sequence; requests.set(id, resolve); worker.postMessage({ id, method, args }); });
+    await call('open', [name, { wasm: false }]);
+    const state = await call('collection', ['docs', { dimension: 2 }]);
+    await call('upsert', ['docs', state.generation, [{ id: 'committed', vector: [1, 0] }]]);
+    worker.terminate();
+    const db = await window.SereneDB.open(name), docs = await db.collection('docs');
+    const response = await docs.search({ vector: [1, 0] }); await db.destroy();
+    return response.results.map(record => record.id);
+  });
+  expect(result).toEqual(['committed']);
+});
+
+test('browser demo ingests and retrieves without external downloads', async ({ page }) => {
+  await page.getByRole('button', { name: 'Open & Ingest' }).click();
+  await expect(page.locator('#status')).toContainText('Committed');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.locator('.result').first()).toContainText('IndexedDB');
+});
+
 test('SIMD exact reference and HNSW recall stay correct off the UI thread', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const db = await window.SereneDB.open(`recall-${crypto.randomUUID()}`), docs = await db.collection('docs', { dimension: 64, index: { efConstruction: 160, efSearch: 128 } });

@@ -49,9 +49,10 @@ export class SIMDScanner {
     if (vector.length !== this.dimension) throw new Error('SIMD query dimension mismatch.');
     new Float32Array(this.kernel.memory.buffer, this.query, this.dimension).set(vector);
     const chunk = Math.max(64, Math.floor(262144 / this.dimension));
+    let lastYield = performance.now();
     for (let start = 0; start < this.count; start += chunk) {
       this.kernel.scan(this.matrix + start * this.dimension * 4, this.query, this.output + start * 4, Math.min(chunk, this.count - start), this.dimension, metric === 'euclidean' ? 1 : 0);
-      if (start + chunk < this.count) { await new Promise<void>(resolve => setTimeout(resolve, 0)); checkAbort(signal); }
+      if (start + chunk < this.count && performance.now() - lastYield > 8) { await new Promise<void>(resolve => setTimeout(resolve, 0)); checkAbort(signal); lastYield = performance.now(); }
     }
     return new Float32Array(this.kernel.memory.buffer, this.output, this.count).slice();
   }

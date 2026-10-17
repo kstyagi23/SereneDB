@@ -55,7 +55,12 @@ function stateFrom(value: unknown, name?: string): CollectionState {
     || !Number.isFinite(state.createdAt) || !Number.isFinite(state.updatedAt) || !state.schema
     || !['cosine', 'dot', 'euclidean'].includes(state.schema.metric)
     || (state.schema.dimension !== null && (!Number.isInteger(state.schema.dimension) || state.schema.dimension < 1 || state.schema.dimension > 16384))
-    || !state.schema.index || !['hnsw', 'flat'].includes(state.schema.index.type)) {
+    || (state.schema.dimension === null && state.count !== 0) || !state.schema.index || !['hnsw', 'flat'].includes(state.schema.index.type)
+    || !Number.isInteger(state.schema.index.m) || state.schema.index.m < 2 || state.schema.index.m > 64
+    || !Number.isInteger(state.schema.index.efConstruction) || state.schema.index.efConstruction < state.schema.index.m || state.schema.index.efConstruction > 4096
+    || !Number.isInteger(state.schema.index.efSearch) || state.schema.index.efSearch < 1 || state.schema.index.efSearch > 65536
+    || !Number.isInteger(state.schema.index.annThreshold) || state.schema.index.annThreshold < 0 || state.schema.index.annThreshold > 10000000
+    || (state.schema.embedding !== null && (!state.schema.embedding || typeof state.schema.embedding.fingerprint !== 'string' || !state.schema.embedding.fingerprint || !state.schema.embedding.config || typeof state.schema.embedding.config !== 'object'))) {
     throw new SereneDBError('Persisted collection state is invalid; no cached or emergency data will be substituted.', 'STORAGE_CORRUPT');
   }
   return state;
@@ -67,7 +72,9 @@ function recordFrom(value: unknown, state: CollectionState, id?: string): Stored
   if (!record || record.collection !== state.name || typeof record.id !== 'string' || !record.id.trim() || record.id.length > 512
     || (id !== undefined && record.id !== id) || !(record.vector instanceof Float32Array)
     || state.schema.dimension === null || record.vector.length !== state.schema.dimension
-    || !Number.isFinite(record.timestamp) || !record.metadata || typeof record.metadata !== 'object' || Array.isArray(record.metadata)) {
+    || !Number.isFinite(record.timestamp) || (record.text !== undefined && typeof record.text !== 'string')
+    || !record.metadata || typeof record.metadata !== 'object' || Array.isArray(record.metadata)
+    || (Object.getPrototypeOf(record.metadata) !== Object.prototype && Object.getPrototypeOf(record.metadata) !== null)) {
     throw new SereneDBError('Persisted vector record does not match its collection schema.', 'STORAGE_CORRUPT');
   }
   return record;
@@ -77,7 +84,7 @@ function checkSchema(tx: IDBTransaction): void {
   const records = tx.objectStore(RECORDS);
   if (tx.objectStore(SYSTEM).keyPath !== 'key' || tx.objectStore(COLLECTIONS).keyPath !== 'name'
     || tx.objectStore(INDEXES).keyPath !== 'collection' || canonical(records.keyPath) !== canonical(['collection', 'id'])
-    || !records.indexNames.contains('collection')) {
+    || !records.indexNames.contains('collection') || [SYSTEM, COLLECTIONS, RECORDS, INDEXES].some(name => tx.objectStore(name).autoIncrement)) {
     throw new SereneDBError('The IndexedDB stores do not match SereneDB version 2.', 'STORAGE_CORRUPT');
   }
   const index = records.index('collection');
@@ -91,7 +98,7 @@ export class Storage {
   private rootGeneration = '';
   private lifecycle: 'open' | 'destroying' | 'closed' = 'open';
   private closedError = new SereneDBError('Database is closed. Open a new Storage connection to use it.', 'DATABASE_CLOSED');
-  private readonly active = new Map<IDBTransaction, (error: unknown) => void>();
+  private readonly active = new Map<IDBTransaction, (error: unknown) => boolean>();
   private durabilityOptions = true;
   private readonly durability: 'strict' | 'relaxed';
   private readonly blockedTimeoutMs: number;
@@ -110,6 +117,7 @@ export class Storage {
 
   static async open(name: string, options: OpenOptions = {}): Promise<Storage> {
     validName(name, 'Database name');
+    options = { ...options };
     if (options.durability !== undefined && options.durability !== 'strict' && options.durability !== 'relaxed') invalid('Durability must be strict or relaxed.');
     if (options.blockedTimeoutMs !== undefined) integer(options.blockedTimeoutMs, 'Blocked timeout', 1, 2147483647);
     if (!globalThis.indexedDB) throw new SereneDBError('IndexedDB is unavailable in this environment.', 'UNSUPPORTED_ENVIRONMENT');
@@ -210,11 +218,14 @@ export class Storage {
       let failure: unknown;
       let value: T;
       let ready = false;
-      const fail = (error: unknown) => {
+      const cancel = (error: unknown): boolean => {
+        // Cancellation is too late once IDB starts committing. Preserve its acknowledgement.
+        try { tx.abort(); } catch { return false; }
         failure ??= error;
-        try { tx.abort(); } catch { /* Completion/closure may already have made the transaction inactive. */ }
+        return true;
       };
-      const onAbort = () => fail(new DOMException('Operation aborted.', 'AbortError'));
+      const fail = (error: unknown) => { failure ??= error; cancel(error); };
+      const onAbort = () => cancel(new DOMException('Operation aborted.', 'AbortError'));
       const cleanup = () => { this.active.delete(tx); signal?.removeEventListener('abort', onAbort); };
       const context: TransactionContext<T> = {
         store: name => tx.objectStore(name),
@@ -226,8 +237,8 @@ export class Storage {
           };
         },
       };
-      this.active.set(tx, fail);
-      tx.onerror = event => { failure ??= (event.target as IDBRequest).error ?? tx.error ?? new SereneDBError('IndexedDB request failed.', 'STORAGE_ERROR'); };
+      this.active.set(tx, cancel);
+      tx.onerror = event => fail((event.target as IDBRequest).error ?? tx.error ?? new SereneDBError('IndexedDB request failed.', 'STORAGE_ERROR'));
       tx.onabort = () => { cleanup(); reject(failure ?? tx.error ?? new DOMException('IndexedDB transaction aborted.', 'AbortError')); };
       tx.oncomplete = () => {
         cleanup();
@@ -269,11 +280,13 @@ export class Storage {
 
   async ensureCollection(name: string, schema: CollectionSchema, options: EnsureCollectionOptions = {}): Promise<CollectionState> {
     validName(name, 'Collection name');
-    checkAbort(options.signal);
-    if (!schema || !['cosine', 'dot', 'euclidean'].includes(schema.metric) || (schema.dimension !== null && schema.dimension === undefined)) invalid('A complete collection schema is required.');
+    const signal = options.signal;
+    const fields = options.explicit === undefined ? undefined : { ...options.explicit };
+    checkAbort(signal);
+    if (!schema || !['cosine', 'dot', 'euclidean'].includes(schema.metric) || schema.dimension === undefined || !schema.index || (schema.embedding !== null && (!schema.embedding || !schema.embedding.config))) invalid('A complete collection schema is required.');
     const normalized = collectionSchema({ dimension: schema.dimension ?? undefined, metric: schema.metric, index: schema.index, embedder: schema.embedding?.config });
     if (schema.embedding && schema.embedding.fingerprint !== normalized.embedding?.fingerprint) invalid('Embedding fingerprint does not match its configuration.', 'SCHEMA_MISMATCH');
-    const explicit = (key: 'dimension' | 'metric' | 'embedding' | 'index') => options.explicit === undefined || options.explicit[key] === true;
+    const explicit = (key: 'dimension' | 'metric' | 'embedding' | 'index') => fields === undefined || fields[key] === true;
     return this.transaction<CollectionState>([COLLECTIONS, INDEXES], 'readwrite', context => {
       const collections = context.store(COLLECTIONS);
       context.watch(collections.get(name), value => {
@@ -301,7 +314,7 @@ export class Storage {
         }
         context.done(state);
       });
-    }, options.signal);
+    }, signal);
   }
 
   async refreshState(name: string, signal?: AbortSignal): Promise<CollectionState> {
@@ -361,11 +374,12 @@ export class Storage {
       if (!input || typeof input !== 'object') invalid('Each upsert must be a prepared record.');
       validName(input.id, 'Record ID');
       if (!(input.vector instanceof Float32Array)) invalid('Prepared vectors must be Float32Array values.');
-      integer(input.vector.length, 'Vector dimension', 1, 16384);
-      if (dimension !== null && dimension !== input.vector.length) invalid('All vectors in a mutation must have the same dimension.', 'SCHEMA_MISMATCH');
-      dimension = input.vector.length;
+      const vector = new Float32Array(input.vector);
+      integer(vector.length, 'Vector dimension', 1, 16384);
+      if (dimension !== null && dimension !== vector.length) invalid('All vectors in a mutation must have the same dimension.', 'SCHEMA_MISMATCH');
+      dimension = vector.length;
       let nonzero = false;
-      for (const value of input.vector) {
+      for (const value of vector) {
         if (!Number.isFinite(value)) invalid('Prepared vectors must contain only finite float32 values.');
         nonzero ||= value !== 0;
       }
@@ -373,7 +387,7 @@ export class Storage {
       if (input.text !== undefined && typeof input.text !== 'string') invalid('Record text must be a string.');
       if (input.timestamp !== undefined && (typeof input.timestamp !== 'number' || !Number.isFinite(input.timestamp))) invalid('Record timestamp must be finite.');
       upserts.set(input.id, {
-        collection: name, id: input.id, vector: input.vector.slice(), metadata: prepareMetadata(input.metadata),
+        collection: name, id: input.id, vector, metadata: prepareMetadata(input.metadata),
         timestamp: input.timestamp ?? now, ...(input.text !== undefined ? { text: input.text } : {}),
       });
     }
@@ -493,7 +507,11 @@ export class Storage {
         settled = true;
         if (error !== undefined) reject(error); else resolve();
       };
-      const onAbort = () => finish(new DOMException('Waiting for database deletion was aborted; the pending deletion cannot be canceled and may still finish.', 'AbortError'));
+      const onAbort = () => {
+        // A complete request wins even if another completion listener aborts the signal.
+        if (request.readyState === 'done') finish(request.error ?? undefined);
+        else finish(new DOMException('Waiting for database deletion was aborted; the pending deletion cannot be canceled and may still finish.', 'AbortError'));
+      };
       request.onsuccess = () => finish();
       request.onerror = () => finish(request.error ?? new SereneDBError('IndexedDB could not delete the database.', 'STORAGE_ERROR'));
       request.onblocked = () => {

@@ -3,6 +3,7 @@ import type { Connection } from './rpc.js';
 import type { CollectionOptions, CollectionState, DatabaseExport, DocumentInput, Metadata, OpenOptions, OperationOptions, SearchOptions, SearchResponse, StoredRecord } from './types.js';
 export type * from './types.js';
 export { SereneDBError } from './errors.js';
+export { chunkDocument } from './chunking.js';
 
 export class Collection {
   constructor(private connection: Connection, public readonly name: string, public readonly generation: string) {}
@@ -34,6 +35,18 @@ export class Collection {
     }
   }
   async addTexts(documents: Array<{ id: string; text: string; metadata?: Metadata }>, options: OperationOptions = {}): Promise<unknown> { return this.upsert(documents, options); }
+  async ingest(source: AsyncIterable<DocumentInput> | Iterable<DocumentInput>, options: OperationOptions & { batchSize?: number } = {}): Promise<{ upserted: number }> {
+    const batchSize = options.batchSize ?? 128;
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10000) throw new RangeError('batchSize must be between 1 and 10000.');
+    let batch: DocumentInput[] = [], upserted = 0;
+    for await (const item of source) {
+      if (options.signal?.aborted) throw new DOMException('Ingestion aborted; earlier batches remain committed.', 'AbortError');
+      batch.push(item);
+      if (batch.length === batchSize) { upserted += (await this.upsert(batch, options)).upserted; batch = []; }
+    }
+    if (batch.length) upserted += (await this.upsert(batch, options)).upserted;
+    return { upserted };
+  }
   preload(options: OperationOptions = {}): Promise<unknown> { return this.call('preload', [], options); }
   checkpoint(options: OperationOptions = {}): Promise<boolean> { return this.call('checkpoint', [], options); }
   compact(options: OperationOptions = {}): Promise<unknown> { return this.call('compact', [], options); }

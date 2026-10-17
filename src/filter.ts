@@ -54,7 +54,8 @@ export function compileFilter(filter?: Filter): (record: StoredRecord) => boolea
             if (!(typeof expected === 'number' && Number.isFinite(expected)) && typeof expected !== 'string') invalid(`${operator} requires a finite number or string.`);
             return (actual: unknown) => {
               if (typeof actual !== typeof expected || (typeof actual !== 'number' && typeof actual !== 'string')) return false;
-              return operator === '$gt' ? actual > (expected as never) : operator === '$gte' ? actual >= (expected as never) : operator === '$lt' ? actual < (expected as never) : actual <= (expected as never);
+              const comparison = typeof actual === 'number' ? actual - (expected as number) : actual < (expected as string) ? -1 : actual > (expected as string) ? 1 : 0;
+              return operator === '$gt' ? comparison > 0 : operator === '$gte' ? comparison >= 0 : operator === '$lt' ? comparison < 0 : comparison <= 0;
             };
           default: invalid(`Unknown filter operator ${operator}.`);
         }
