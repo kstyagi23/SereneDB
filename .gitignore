@@ -1,0 +1,7 @@
+node_modules/
+dist/
+native/target/
+test-results/
+playwright-report/
+.cache/
+*.tsbuildinfo

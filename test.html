@@ -1,482 +1,90 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SereneDB Test Suite</title>
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }
-        h1 {
-            color: #333;
-            border-bottom: 2px solid #4CAF50;
-            padding-bottom: 10px;
-        }
-        h2 {
-            color: #555;
-            margin-top: 30px;
-        }
-        .test-section {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 15px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .test-result {
-            padding: 10px 15px;
-            margin: 8px 0;
-            border-radius: 4px;
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 14px;
-        }
-        .pass {
-            background: #d4edda;
-            color: #155724;
-            border-left: 4px solid #28a745;
-        }
-        .fail {
-            background: #f8d7da;
-            color: #721c24;
-            border-left: 4px solid #dc3545;
-        }
-        .info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border-left: 4px solid #17a2b8;
-        }
-        .warning {
-            background: #fff3cd;
-            color: #856404;
-            border-left: 4px solid #ffc107;
-        }
-        button {
-            background: #4CAF50;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            margin: 5px;
-        }
-        button:hover {
-            background: #45a049;
-        }
-        button:disabled {
-            background: #cccccc;
-            cursor: not-allowed;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }
-        .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            text-align: center;
-        }
-        .stat-card h3 {
-            margin: 0;
-            font-size: 32px;
-        }
-        .stat-card p {
-            margin: 5px 0 0 0;
-            opacity: 0.9;
-        }
-        pre {
-            background: #2d2d2d;
-            color: #f8f8f2;
-            padding: 15px;
-            border-radius: 4px;
-            overflow-x: auto;
-            font-size: 13px;
-        }
-        .progress {
-            width: 100%;
-            height: 20px;
-            background: #e0e0e0;
-            border-radius: 10px;
-            overflow: hidden;
-            margin: 10px 0;
-        }
-        .progress-bar {
-            height: 100%;
-            background: linear-gradient(90deg, #4CAF50, #8BC34A);
-            transition: width 0.3s ease;
-        }
-        #summary {
-            position: sticky;
-            top: 0;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            margin-bottom: 20px;
-            z-index: 100;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111817">
+  <title>SereneDB | Local Search Studio</title>
+  <link rel="stylesheet" href="./demo.css">
 </head>
 <body>
-    <h1>🧪 SereneDB Test Suite</h1>
-    
-    <div id="summary">
-        <div class="stats">
-            <div class="stat-card">
-                <h3 id="totalTests">0</h3>
-                <p>Total Tests</p>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%);">
-                <h3 id="passedTests">0</h3>
-                <p>Passed</p>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #dc3545 0%, #fd7e14 100%);">
-                <h3 id="failedTests">0</h3>
-                <p>Failed</p>
-            </div>
-        </div>
-        <button onclick="runAllTests()">▶ Run All Tests</button>
-        <button onclick="clearResults()">🗑 Clear Results</button>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+<main>
+  <header class="topbar">
+    <a class="brand" href="./test.html" aria-label="SereneDB home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>SereneDB<span class="brand-dot">.</span></a>
+    <div class="topbar-right"><span class="local-badge"><span class="status-dot" aria-hidden="true"></span>Runs on your device</span><span class="version">SEARCH STUDIO / 02</span></div>
+  </header>
+
+  <div class="intro">
+    <div><p class="eyebrow">A little less cloud. A lot more control.</p><h1>Find the meaning.<br><span>Keep the data.</span></h1><p class="intro-copy">Turn your documents into a searchable collection. Start instantly with keywords, or bring an embedding model into your browser.</p></div>
+    <aside class="privacy-note"><span class="note-line"></span><strong>Private by design.</strong><p>Documents and queries stay on this device. Hugging Face receives model-file requests only when you choose to download.</p></aside>
+  </div>
+
+  <section class="model-panel" aria-labelledby="setup-title">
+    <div class="section-heading"><div><p class="eyebrow">01 / Choose your engine</p><h2 id="setup-title">How do you want to search?</h2></div><span id="engine-badge" class="badge">No model needed</span></div>
+    <fieldset class="mode-options"><legend class="sr-only">Search engine</legend>
+      <label class="mode-card"><input type="radio" name="mode" value="lexical" checked><span class="mode-copy"><strong>Keyword search</strong><span>Instant BM25 retrieval. No model download.</span></span><span class="mode-marker" aria-hidden="true"></span></label>
+      <label class="mode-card"><input type="radio" name="mode" value="semantic"><span class="mode-copy"><strong>Semantic search</strong><span>Search by meaning with a local ONNX model.</span></span><span class="mode-marker" aria-hidden="true"></span></label>
+    </fieldset>
+
+    <div id="model-settings" hidden>
+      <div class="model-config-row">
+        <div class="field"><label for="model-preset">Embedding model</label><select id="model-preset"><option value="minilm">MiniLM L6 / compact &amp; fast</option><option value="custom">Custom Hugging Face model</option></select></div>
+        <div class="field"><label for="device">Run on</label><select id="device"><option value="wasm">CPU / WebAssembly</option><option value="auto">Prefer WebGPU / CPU fallback</option></select></div>
+        <div class="model-summary"><span id="model-size">~23 MB weights</span><span id="model-shape">384 dimensions</span></div>
+      </div>
+      <div id="custom-model-fields" class="custom-fields" hidden>
+        <div class="field"><label for="model-id">Hugging Face repository</label><input id="model-id" value="Xenova/all-MiniLM-L6-v2" placeholder="organization/model-name" spellcheck="false" autocomplete="off" aria-describedby="model-help"></div>
+        <div class="field"><label for="model-revision">Revision</label><input id="model-revision" value="main" placeholder="Commit SHA, branch, or tag" spellcheck="false" autocomplete="off"></div>
+      </div>
+      <details id="model-advanced" class="advanced"><summary>Advanced embedding settings</summary><div class="advanced-fields">
+        <div class="field"><label for="model-dtype">ONNX weights</label><select id="model-dtype"><option value="q8">q8 / quantized</option><option value="fp32">fp32 / full precision</option><option value="fp16">fp16 / half precision</option><option value="q4">q4 / 4-bit</option><option value="q4f16">q4f16</option></select></div>
+        <div class="field"><label for="model-pooling">Pooling</label><select id="model-pooling"><option value="mean">Mean</option><option value="cls">CLS</option><option value="last_token">Last token</option></select></div>
+        <div class="field"><label for="model-tokens">Maximum tokens</label><input id="model-tokens" type="number" value="512" min="1" max="32768" step="1"></div>
+        <label class="checkbox-field"><input id="model-normalize" type="checkbox" checked>Normalize embeddings</label>
+        <div class="field"><label for="query-prefix">Query prefix</label><input id="query-prefix" value="" placeholder="e.g. query: " spellcheck="false"></div>
+        <div class="field"><label for="document-prefix">Document prefix</label><input id="document-prefix" value="" placeholder="e.g. passage: " spellcheck="false"></div>
+      </div></details>
+      <p id="model-help" class="help">Use a public ONNX feature-extraction model supported by Transformers.js. Its repository must contain the selected weights; pooling and prefixes must match its model card. Pin a commit SHA for reproducible embeddings.</p>
+      <div class="download-consent"><label class="checkbox-field"><input id="download-consent" type="checkbox">Allow downloading model files from Hugging Face</label><p>Optional. Leave this off to load an already cached model without remote model access. The local ONNX runtime may add ~28 MB on first use.</p></div>
+      <div class="model-toolbar"><div class="actions"><button id="load-model" type="button">Load cached model</button><button id="unload-model" type="button" class="secondary" disabled>Unload from memory</button><button id="remove-model" type="button" class="text-button" disabled>Remove cached files</button></div><a id="model-link" href="https://huggingface.co/Xenova/all-MiniLM-L6-v2" target="_blank" rel="noopener noreferrer">View model card <span aria-hidden="true">&#8599;</span></a></div>
+      <div class="model-state-line"><span id="model-state" role="status" aria-live="polite">Not loaded. Downloads are off.</span><span id="cache-state">Checking local cache...</span></div>
     </div>
+  </section>
 
-    <div id="testResults"></div>
+  <div id="workspace" class="workspace">
+    <section class="documents-panel" aria-labelledby="documents-title">
+      <div class="section-heading"><div><p class="eyebrow">02 / Add your knowledge</p><h2 id="documents-title">Documents</h2></div><button id="sample" type="button" class="text-button">Use sample</button></div>
+      <label for="documents" class="sr-only">Documents, separated by a blank line</label>
+      <textarea id="documents" spellcheck="false" aria-describedby="documents-help">IndexedDB stores structured data persistently inside your browser.
 
-    <script src="SereneDB.js"></script>
-    <script>
-        let testStats = { total: 0, passed: 0, failed: 0 };
-        let db;
+HNSW builds a graph for fast approximate nearest-neighbor retrieval.
 
-        function updateStats() {
-            document.getElementById('totalTests').textContent = testStats.total;
-            document.getElementById('passedTests').textContent = testStats.passed;
-            document.getElementById('failedTests').textContent = testStats.failed;
-        }
+Transformers.js runs ONNX embedding models locally using WebAssembly or WebGPU.
 
-        function log(message, type = 'info') {
-            const resultsDiv = document.getElementById('testResults');
-            const resultDiv = document.createElement('div');
-            resultDiv.className = `test-result ${type}`;
-            resultDiv.textContent = message;
-            resultsDiv.appendChild(resultDiv);
-        }
+Sourdough bread needs flour, water, salt, and a living starter.</textarea>
+      <div class="editor-footer"><p id="documents-help">Separate documents with a blank line.</p><span id="draft-count">4 documents</span></div>
+      <div class="document-actions"><button id="ingest" type="button">Save documents <span aria-hidden="true">&#8594;</span></button><div><button id="import-text" type="button" class="secondary">Import text</button><input id="text-file" type="file" accept=".txt,.md,text/plain,text/markdown" hidden></div></div>
+      <p id="save-help" class="help">New documents are added in one transaction. Identical text is saved only once; existing documents are kept.</p>
+      <div class="collection-footer"><span class="collection-label"><span class="status-dot" aria-hidden="true"></span><span id="collection-count">0 saved documents</span></span><button id="reset" type="button" class="text-button" disabled>Clear collection</button></div>
+    </section>
 
-        function clearResults() {
-            document.getElementById('testResults').innerHTML = '';
-            testStats = { total: 0, passed: 0, failed: 0 };
-            updateStats();
-        }
+    <section class="search-panel" aria-labelledby="search-title">
+      <div class="section-heading"><div><p class="eyebrow">03 / Ask something</p><h2 id="search-title">Search your collection</h2></div><span id="search-mode-label" class="badge">Keyword</span></div>
+      <form id="search-form"><label for="query" class="sr-only">Search query</label><div class="query-row"><input id="query" value="persistent data in the browser" placeholder="What are you looking for?" autocomplete="off" required><button id="search" type="submit">Search</button></div>
+        <div class="search-options"><div class="field"><label for="retrieval">Strategy</label><select id="retrieval" disabled><option value="hybrid">Keyword / BM25</option></select></div><div class="field top-k"><label for="top-k">Results</label><select id="top-k"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select></div></div>
+      </form>
+      <div class="suggestions" aria-label="Sample queries"><button type="button" data-query="persistent data in the browser">Browser storage</button><button type="button" data-query="local ONNX embedding models">Local models</button><button type="button" data-query="sourdough bread">Something else</button></div>
+      <div class="results-heading"><h3>Results</h3><span id="search-metrics">Ready when you are</span></div>
+      <div id="results" aria-live="polite" aria-busy="false"><div class="empty-state"><span class="empty-mark" aria-hidden="true">&#8981;</span><strong>A good answer starts here.</strong><p>Save a few documents, then search. Everything stays in this browser.</p></div></div>
+    </section>
+  </div>
 
-        function assert(condition, testName) {
-            testStats.total++;
-            if (condition) {
-                testStats.passed++;
-                log(`✅ PASS: ${testName}`, 'pass');
-                return true;
-            } else {
-                testStats.failed++;
-                log(`❌ FAIL: ${testName}`, 'fail');
-                return false;
-            }
-        }
+  <section class="activity-panel" aria-label="Operation status"><span id="activity-indicator" class="activity-indicator" aria-hidden="true"></span><div class="activity-copy"><p id="status" role="status" aria-live="polite" aria-atomic="true">Ready. Start with the sample documents or add your own.</p><div id="operation-progress" hidden><progress id="progress-bar" max="1" aria-label="Operation progress"></progress><span id="progress-label"></span></div></div><button id="cancel" type="button" class="secondary" hidden>Cancel</button></section>
+  <footer><p>IndexedDB persistence. Worker-based execution. No database server.</p><div><span id="storage-status">Local storage</span><button id="export" type="button" class="text-button" disabled>Export backup</button></div></footer>
+</main>
 
-        async function runAllTests() {
-            clearResults();
-            
-            try {
-                await testInitialization();
-                await testDataStorage();
-                await testDataRetrieval();
-                await testVectorSearch();
-                await testCacheManagement();
-                await testUtilityMethods();
-                await testMemoryManagement();
-                await testErrorHandling();
-                await testCleanup();
-            } catch (error) {
-                log(`⚠️ Test suite error: ${error.message}`, 'fail');
-            }
-            
-            updateStats();
-            log(`\n📊 Test Summary: ${testStats.passed}/${testStats.total} tests passed`, 
-                testStats.failed === 0 ? 'pass' : 'fail');
-        }
-
-        async function testInitialization() {
-            log('\n📦 Testing Initialization...', 'info');
-            
-            // Test 1: Create database
-            db = new SereneDB('TestDB');
-            await db.create();
-            assert(db !== null, 'Database created successfully');
-            
-            // Test 2: Check initial state
-            assert(db.count() === 0, 'Initial count is 0');
-            
-            // Test 3: Check metadata
-            const metadata = db.getMetadata();
-            assert(metadata.itemCount === 0, 'Metadata itemCount is 0');
-        }
-
-        async function testDataStorage() {
-            log('\n💾 Testing Data Storage...', 'info');
-            
-            // Test 1: Insert single vector
-            const vector1 = {
-                id: 'vec1',
-                vector: [1, 0, 0, 0],
-                metadata: { label: 'first' }
-            };
-            await db.saveDataToSereneDB(vector1);
-            assert(db.count() === 1, 'Single vector inserted');
-            
-            // Test 2: Insert multiple vectors
-            const vectors = [
-                { id: 'vec2', vector: [0, 1, 0, 0], metadata: { label: 'second' } },
-                { id: 'vec3', vector: [0, 0, 1, 0], metadata: { label: 'third' } },
-                { id: 'vec4', vector: [0, 0, 0, 1], metadata: { label: 'fourth' } }
-            ];
-            await db.saveDataToSereneDB(vectors);
-            assert(db.count() === 4, 'Multiple vectors inserted');
-            
-            // Test 3: Update existing vector
-            const updatedVector = {
-                id: 'vec1',
-                vector: [1, 1, 0, 0],
-                metadata: { label: 'updated-first' }
-            };
-            await db.saveDataToSereneDB(updatedVector);
-            const retrieved = db.get('vec1');
-            assert(retrieved.metadata.label === 'updated-first', 'Vector updated successfully');
-            
-            // Test 4: Batch insert
-            const batchVectors = [];
-            for (let i = 5; i <= 20; i++) {
-                batchVectors.push({
-                    id: `vec${i}`,
-                    vector: [Math.random(), Math.random(), Math.random(), Math.random()],
-                    metadata: { index: i }
-                });
-            }
-            await db.batchInsert(batchVectors, (current, total) => {
-                // Progress callback
-            });
-            assert(db.count() === 20, 'Batch insert completed');
-        }
-
-        async function testDataRetrieval() {
-            log('\n🔍 Testing Data Retrieval...', 'info');
-            
-            // Test 1: Get by ID
-            const vec1 = db.get('vec1');
-            assert(vec1 !== null && vec1.id === 'vec1', 'Get by ID works');
-            
-            // Test 2: Get non-existent ID
-            const notFound = db.get('nonexistent');
-            assert(notFound === null, 'Get non-existent returns null');
-            
-            // Test 3: Has method
-            assert(db.has('vec1') === true, 'Has returns true for existing');
-            assert(db.has('nonexistent') === false, 'Has returns false for non-existing');
-            
-            // Test 4: Get all IDs
-            const ids = db.getAllIds();
-            assert(ids.length === 20, 'getAllIds returns correct count');
-            
-            // Test 5: Get all vectors
-            const all = db.getAll();
-            assert(all.length === 20, 'getAll returns correct count');
-        }
-
-        async function testVectorSearch() {
-            log('\n🎯 Testing Vector Search...', 'info');
-            
-            // Test 1: Cosine similarity search
-            const queryVector = [1, 0, 0, 0];
-            const results = db.performSereneDBVectorSearch(queryVector, { limit: 5 });
-            assert(results.length > 0, 'Vector search returns results');
-            
-            // Test 2: Results are sorted by similarity
-            if (results.length > 1) {
-                const sorted = results.every((item, i) => 
-                    i === 0 || results[i-1].similarity >= item.similarity
-                );
-                assert(sorted, 'Results sorted by similarity (descending)');
-            }
-            
-            // Test 3: Limit parameter works
-            const limitedResults = db.performSereneDBVectorSearch(queryVector, { limit: 3 });
-            assert(limitedResults.length === 3, 'Limit parameter works');
-            
-            // Test 4: Threshold parameter works
-            const thresholdResults = db.performSereneDBVectorSearch(queryVector, { 
-                threshold: 0.99,
-                limit: 100 
-            });
-            const allAboveThreshold = thresholdResults.every(r => r.similarity >= 0.99);
-            assert(allAboveThreshold, 'Threshold parameter filters results');
-            
-            // Test 5: Different distance metrics
-            const euclideanResults = db.performSereneDBVectorSearch(queryVector, { 
-                metric: 'euclidean',
-                limit: 5 
-            });
-            assert(euclideanResults.length > 0, 'Euclidean distance works');
-            
-            const dotResults = db.performSereneDBVectorSearch(queryVector, { 
-                metric: 'dot',
-                limit: 5 
-            });
-            assert(dotResults.length > 0, 'Dot product works');
-            
-            // Test 6: Search config
-            db.setSearchConfig({ limit: 7, metric: 'cosine' });
-            const config = db.getSearchConfig();
-            assert(config.limit === 7, 'Search config updated');
-        }
-
-        async function testCacheManagement() {
-            log('\n🗄 Testing Cache Management...', 'info');
-            
-            // Test 1: Update cache
-            db.updateCacheInSereneDB();
-            const cacheKey = 'sereneDB_cache_TestDB';
-            const cached = localStorage.getItem(cacheKey);
-            assert(cached !== null, 'Cache saved to localStorage');
-            
-            // Test 2: Load from cache
-            const newDb = new SereneDB('TestDB');
-            await newDb.create();
-            assert(newDb.count() === 20, 'Cache loaded correctly');
-            
-            // Test 3: Sync
-            await newDb.syncSereneDBCacheAndDatabase();
-            assert(newDb.count() === 20, 'Sync works correctly');
-            
-            // Test 4: Clear cache
-            newDb.clearSereneDBCache();
-            const clearedCache = localStorage.getItem('sereneDB_cache_TestDB');
-            assert(clearedCache === null, 'Cache cleared');
-            
-            // Clean up
-            newDb.close();
-        }
-
-        async function testUtilityMethods() {
-            log('\n🛠 Testing Utility Methods...', 'info');
-            
-            // Test 1: Export
-            const exported = db.export();
-            assert(exported.data.length === 20, 'Export works');
-            assert(exported.dbName === 'TestDB', 'Export includes dbName');
-            
-            // Test 2: Import
-            const importDb = new SereneDB('ImportTestDB');
-            await importDb.create();
-            await importDb.import(exported);
-            assert(importDb.count() === 20, 'Import works');
-            
-            // Test 3: Memory stats
-            const stats = db.getMemoryStats();
-            assert(stats.itemCount === 20, 'Memory stats correct');
-            assert(stats.estimatedBytes > 0, 'Memory estimation works');
-            
-            // Test 4: Delete
-            await db.delete('vec1');
-            assert(db.count() === 19, 'Delete works');
-            assert(db.get('vec1') === null, 'Deleted item not found');
-            
-            // Test 5: Delete many
-            await db.deleteMany(['vec2', 'vec3']);
-            assert(db.count() === 17, 'Delete many works');
-            
-            // Clean up
-            await importDb.destroy();
-        }
-
-        async function testMemoryManagement() {
-            log('\n🧠 Testing Memory Management...', 'info');
-            
-            // Test 1: Unload
-            const memDb = new SereneDB('MemoryTestDB');
-            await memDb.create();
-            await memDb.saveDataToSereneDB([
-                { id: 'm1', vector: [1, 2, 3] },
-                { id: 'm2', vector: [4, 5, 6] }
-            ]);
-            assert(memDb.count() === 2, 'Data loaded');
-            
-            memDb.unloadSereneDBDataFromMemory(false);
-            assert(memDb.count() === 0, 'Memory unloaded');
-            
-            // Test 2: Optimize search
-            db.optimizeSereneDBSearchPerformance({ useQuantization: false });
-            assert(true, 'Optimization runs without error');
-            
-            // Clean up
-            await memDb.destroy();
-        }
-
-        async function testErrorHandling() {
-            log('\n⚠️ Testing Error Handling...', 'info');
-            
-            // Test 1: Error handler
-            const error = db.sereneDBErrorHandler('Test error');
-            assert(error.name === 'SereneDBError', 'Error handler creates SereneDBError');
-            
-            // Test 2: Missing ID
-            try {
-                await db.saveDataToSereneDB({ vector: [1, 2, 3] });
-                assert(false, 'Should throw error for missing ID');
-            } catch (e) {
-                assert(true, 'Throws error for missing ID');
-            }
-            
-            // Test 3: Missing vector
-            try {
-                await db.saveDataToSereneDB({ id: 'test' });
-                assert(false, 'Should throw error for missing vector');
-            } catch (e) {
-                assert(true, 'Throws error for missing vector');
-            }
-            
-            // Test 4: Dimension mismatch
-            try {
-                await db.saveDataToSereneDB({ id: 'wrong', vector: [1, 2, 3] });
-                assert(false, 'Should throw error for dimension mismatch');
-            } catch (e) {
-                assert(true, 'Throws error for dimension mismatch');
-            }
-        }
-
-        async function testCleanup() {
-            log('\n🧹 Testing Cleanup...', 'info');
-            
-            // Test 1: Close
-            db.close();
-            assert(true, 'Database closed');
-            
-            // Test 2: Destroy
-            await db.destroy();
-            assert(true, 'Database destroyed');
-            
-            // Verify destruction
-            const testDb = new SereneDB('TestDB');
-            await testDb.create();
-            assert(testDb.count() === 0, 'Database was properly destroyed');
-            await testDb.destroy();
-        }
-    </script>
+<dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><form method="dialog"><p class="eyebrow">You are in control</p><h2 id="confirm-title">Clear this collection?</h2><p id="confirm-description"></p><div class="actions"><button value="cancel" class="secondary">Keep it</button><button id="confirm-action" value="confirm" class="danger">Clear collection</button></div></form></dialog>
+<script type="module" src="./demo.js"></script>
 </body>
 </html>

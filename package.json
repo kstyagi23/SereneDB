@@ -1,0 +1,36 @@
+{
+  "name": "serenedb",
+  "version": "0.2.0",
+  "description": "Transactional, worker-native vector retrieval for the browser",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./local": { "types": "./dist/local.d.ts", "import": "./dist/local.js" },
+    "./transformers": { "types": "./dist/transformers.d.ts", "import": "./dist/transformers.js" },
+    "./legacy": { "types": "./dist/legacy.d.ts", "import": "./dist/legacy.js" }
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:browser": "playwright test",
+    "test:model": "playwright test --project=edge tests/browser/model.spec.ts",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "dev": "node scripts/serve.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "@huggingface/transformers": "4.3.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
+    "fake-indexeddb": "^6.2.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}
